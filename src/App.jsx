@@ -151,7 +151,7 @@ function Ticket({ slip, onResult }) {
 }
 
 /* ================= BOARD (live lines + edge leaderboard) ================= */
-const PROPS_SYSTEM = `You are a prop scoring engine. Web search today's confirmed slate, lineups, and prop lines first. Respond ONLY with raw JSON, no fences: {"props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"one short data reason"}]} — 8 to 12 props ranked by est_prob descending. est_prob is your honest estimated hit percentage (integer 1-99), never inflated.`;
+const PROPS_SYSTEM = `You are a player-prop ranking engine. FIRST web search today's date and which games are actually being played today in the requested sport, then confirmed lineups/injuries, then the current prop lines. Only include players in games happening today. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"one short data reason"}]} — return 12 to 18 props ranked by est_prob descending, spread across multiple games, not all from one player. est_prob is your honest estimated hit percentage (integer 1-99), never inflated. If no games today, return {"slate_note":"No games today","props":[]}.`;
 
 function devig(outcomes) {
   // Convert American odds to implied probs, remove the vig by normalizing
@@ -184,6 +184,7 @@ function BoardTab({ onAsk }) {
   const [props_, setProps] = useState(null);
   const [propBusy, setPropBusy] = useState(false);
   const [propErr, setPropErr] = useState("");
+  const [slateNote, setSlateNote] = useState("");
 
   useEffect(() => {
     let dead = false;
@@ -213,16 +214,17 @@ function BoardTab({ onAsk }) {
 
   async function scoreProps() {
     if (propBusy) return;
-    setPropBusy(true); setPropErr("");
+    setPropBusy(true); setPropErr(""); setSlateNote("");
     try {
       const raw = await apiChat(
-        [{ role: "user", content: `Score today's best ${sport.toUpperCase()} player props. Return ONLY the JSON.` }],
-        { system: PROPS_SYSTEM, useSearch: true, max_tokens: 2500 }
+        [{ role: "user", content: `Rank today's best ${sport.toUpperCase()} player props across every game being played today. Return ONLY the JSON.` }],
+        { system: PROPS_SYSTEM, useSearch: true, max_tokens: 3500 }
       );
       const clean = String(raw).replace(/```json|```/g, "").trim();
       const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
       if (a < 0 || b < 0) throw new Error("No scores returned — run it again");
       const parsed = JSON.parse(clean.slice(a, b + 1));
+      setSlateNote(parsed.slate_note || "");
       const list = (parsed.props || []).filter((p) => p && p.player).sort((x, y) => (y.est_prob || 0) - (x.est_prob || 0));
       setProps(list);
     } catch (e) {
@@ -234,12 +236,52 @@ function BoardTab({ onAsk }) {
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>The board</H1>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "10px 0 12px" }}>
-        <Seg options={["Edge", "Lines"]} value={mode} onChange={setMode} />
-        <Seg options={["mlb", "worldcup", "nba", "nfl"]} value={sport} onChange={setSport} />
+        <Seg options={["Edge", "Props", "Lines"]} value={mode} onChange={setMode} />
+        <Seg options={["mlb", "worldcup", "nba", "nfl", "nhl"]} value={sport} onChange={setSport} />
       </div>
 
-      {loading && <Spinner label="Pulling the board…" />}
-      {err && <div style={{ color: T.red, fontSize: 13 }}>{err}</div>}
+      {loading && mode !== "Props" && <Spinner label="Pulling the board…" />}
+      {err && mode !== "Props" && <div style={{ color: T.red, fontSize: 13 }}>{err}</div>}
+
+      {mode === "Props" && (
+        <div>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, margin: "4px 0 8px" }}>
+            Every player prop ranked by hit % · today's slate only
+          </div>
+          <button onClick={scoreProps} disabled={propBusy} style={{
+            width: "100%", background: T.amber, border: "none", borderRadius: 12, padding: "13px 0",
+            fontFamily: D, fontWeight: 800, fontSize: 18, letterSpacing: 1, color: "#1A1300",
+            cursor: "pointer", textTransform: "uppercase", opacity: propBusy ? 0.5 : 1,
+          }}>{propBusy ? "Ranking the slate…" : props_ ? "Refresh rankings" : `Rank today's ${sport.toUpperCase()} props`}</button>
+          {propBusy && <Spinner label="Checking today's games, lineups, and lines…" />}
+          {propErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{propErr}</div>}
+          {slateNote && <div style={{ fontFamily: M, fontSize: 12, color: T.green, margin: "10px 0 4px" }}>● {slateNote}</div>}
+          {(props_ || []).map((p, i) => (
+            <button key={i} onClick={() => onAsk(`Deep read: ${p.player} ${p.prop} (${p.game}). Worth a leg today?`)} style={{
+              display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
+              borderRadius: 12, padding: "11px 14px", marginTop: 8, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
+                  <span style={{ fontFamily: M, color: T.amber, fontSize: 12, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
+                  {p.player} · {p.prop}
+                </div>
+                {p.odds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(p.odds).startsWith("-") ? T.red : T.green }}>{p.odds}</div>}
+              </div>
+              <div style={{ fontSize: 11, color: T.dim, margin: "3px 0 6px" }}>{p.game}{p.why ? " — " + p.why : ""}</div>
+              <ProbBar pct={Math.round(p.est_prob || 0)} />
+            </button>
+          ))}
+          {props_ && props_.length > 0 && (
+            <div style={{ fontSize: 11, color: T.dim, marginTop: 10, lineHeight: 1.5 }}>
+              AI estimates from live research, not sportsbook-implied — always confirm the number on FanDuel before locking.
+            </div>
+          )}
+          {props_ && props_.length === 0 && !propBusy && (
+            <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 20 }}>No {sport.toUpperCase()} games today.</div>
+          )}
+        </div>
+      )}
 
       {mode === "Edge" && !loading && !err && (
         <div>
@@ -263,39 +305,8 @@ function BoardTab({ onAsk }) {
               <ProbBar pct={e.pct} />
             </button>
           ))}
-
-          <div style={{ marginTop: 18, borderTop: `1px solid ${T.line}`, paddingTop: 14 }}>
-            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, marginBottom: 8 }}>
-              AI prop scores · model-estimated hit % from live research
-            </div>
-            <button onClick={scoreProps} disabled={propBusy} style={{
-              width: "100%", background: T.amber, border: "none", borderRadius: 12, padding: "12px 0",
-              fontFamily: D, fontWeight: 800, fontSize: 17, letterSpacing: 1, color: "#1A1300",
-              cursor: "pointer", textTransform: "uppercase", opacity: propBusy ? 0.5 : 1,
-            }}>{propBusy ? "Scoring the slate…" : props_ ? "Re-score props" : "Score today's props"}</button>
-            {propBusy && <Spinner label="Searching lineups, lines, and matchups…" />}
-            {propErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{propErr}</div>}
-            {(props_ || []).map((p, i) => (
-              <button key={i} onClick={() => onAsk(`Deep read: ${p.player} ${p.prop} (${p.game}). Worth a leg tonight?`)} style={{
-                display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
-                borderRadius: 12, padding: "11px 14px", marginTop: 7, cursor: "pointer", fontFamily: "'Inter', sans-serif",
-              }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                  <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
-                    <span style={{ fontFamily: M, color: T.dim, fontSize: 11, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
-                    {p.player} · {p.prop}
-                  </div>
-                  {p.odds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(p.odds).startsWith("-") ? T.red : T.green }}>{p.odds}</div>}
-                </div>
-                <div style={{ fontSize: 11, color: T.dim, margin: "3px 0 6px" }}>{p.game}{p.why ? " — " + p.why : ""}</div>
-                <ProbBar pct={Math.round(p.est_prob || 0)} />
-              </button>
-            ))}
-            {props_ && (
-              <div style={{ fontSize: 11, color: T.dim, marginTop: 8, lineHeight: 1.5 }}>
-                AI estimates, not sportsbook-implied — always check the live number on FanDuel before locking.
-              </div>
-            )}
+          <div style={{ fontSize: 11, color: T.dim, marginTop: 12, lineHeight: 1.5 }}>
+            Want player props ranked instead? Switch to the Props tab above.
           </div>
         </div>
       )}
@@ -629,19 +640,56 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [deep, setDeep] = useState(false);
+  const [image, setImage] = useState(null); // { dataUrl, media_type, base64 }
   const endRef = useRef(null);
+  const fileRef = useRef(null);
   const started = useRef(false);
 
   useEffect(() => { try { endRef.current?.scrollIntoView({ behavior: "smooth" }); } catch {} }, [msgs, busy]);
 
+  function onPickImage(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (!/^image\//.test(f.type)) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result);
+      const base64 = dataUrl.split(",")[1];
+      setImage({ dataUrl, media_type: f.type, base64 });
+    };
+    reader.readAsDataURL(f);
+    e.target.value = "";
+  }
+
   async function send(text) {
     const q = String(text ?? input).trim();
-    if (!q || busy) return;
+    if ((!q && !image) || busy) return;
     setInput("");
-    const next = [...msgs, { role: "user", content: q }];
-    setMsgs(next); setBusy(true);
+
+    // Build the user message: array content if there's an image, else plain string
+    let userContent;
+    let displayText = q;
+    if (image) {
+      userContent = [
+        { type: "image", source: { type: "base64", media_type: image.media_type, data: image.base64 } },
+        { type: "text", text: q || "Read this bet slip / screenshot. Break down each leg, confirm today's lines and lineups, and give me the play." },
+      ];
+      displayText = (q || "Read this screenshot") + "  [📷 image attached]";
+    } else {
+      userContent = q;
+    }
+
+    const shownMsg = { role: "user", content: displayText };
+    const apiMsg = { role: "user", content: userContent };
+    const shownNext = [...msgs, shownMsg];
+    setMsgs(shownNext);
+    setImage(null);
+    setBusy(true);
+
+    // API history: reuse prior text messages + this one (images only on current turn)
+    const apiHistory = msgs.map((m) => ({ role: m.role, content: m.content })).concat([apiMsg]);
     try {
-      const reply = await apiChat(next, {
+      const reply = await apiChat(apiHistory, {
         system: (deep ? DEEP_SYSTEM : CHAT_SYSTEM) + historyBlock(),
         useSearch: true,
         max_tokens: deep ? 3000 : 1500,
@@ -677,7 +725,7 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
               Ask the desk<span style={{ color: T.amber }}>.</span>
             </div>
             <div style={{ color: T.dim, fontSize: 13.5, marginTop: 8, lineHeight: 1.5 }}>
-              Live-searched lines, lineups, injuries, matchup reads — or paste a full slip for a leg-by-leg grade.
+              Live-searched lines, lineups, injuries, matchup reads — or upload a screenshot of your slip for a leg-by-leg grade.
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
               {starters.map((s) => (
@@ -712,14 +760,26 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
         <div ref={endRef} />
       </div>
       <div style={{ padding: "10px 14px 14px", borderTop: `1px solid ${T.line}` }}>
+        {image && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10, padding: 8 }}>
+            <img src={image.dataUrl} alt="attached" style={{ height: 44, width: 44, objectFit: "cover", borderRadius: 6 }} />
+            <div style={{ flex: 1, fontSize: 12.5, color: T.dim }}>Screenshot attached — I'll read it.</div>
+            <button onClick={() => setImage(null)} style={{ background: "transparent", border: "none", color: T.red, fontFamily: D, fontWeight: 700, fontSize: 14, cursor: "pointer", textTransform: "uppercase" }}>Remove</button>
+          </div>
+        )}
         <button onClick={() => setDeep(!deep)} style={{
           marginBottom: 8, background: deep ? T.amber : "transparent", color: deep ? "#1A1300" : T.dim,
           border: `1.5px solid ${deep ? T.amber : T.line}`, borderRadius: 99, padding: "5px 14px",
           fontFamily: D, fontWeight: 700, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer",
         }}>◆ Deep research {deep ? "ON" : "OFF"}</button>
+        <input ref={fileRef} type="file" accept="image/*" onChange={onPickImage} style={{ display: "none" }} />
         <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => fileRef.current && fileRef.current.click()} title="Attach screenshot" style={{
+            background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10, padding: "0 14px",
+            color: T.amber, fontSize: 18, cursor: "pointer",
+          }}>📷</button>
           <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="Ask about props, lineups, matchups…" style={{
+            placeholder={image ? "Add a note (optional)…" : "Ask about props, lineups, matchups…"} style={{
               flex: 1, background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10,
               padding: "11px 13px", color: T.text, fontSize: 14, outline: "none", fontFamily: "'Inter', sans-serif",
             }} />
