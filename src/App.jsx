@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 
 /* ================= THEME ================= */
 const T = {
@@ -9,37 +9,67 @@ const T = {
 const D = "'Barlow Condensed', sans-serif";
 const M = "'IBM Plex Mono', monospace";
 
-/* ================= API HELPERS ================= */
-async function apiChat(messages, { system, useSearch = true, model } = {}) {
+/* ================= ERROR BOUNDARY (no more white screens) ================= */
+class Boundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  render() {
+    if (this.state.err) {
+      return (
+        <div style={{ padding: 20, color: T.text, fontFamily: "'Inter', sans-serif" }}>
+          <div style={{ fontFamily: D, fontWeight: 800, fontSize: 24, textTransform: "uppercase", color: T.red }}>Something broke</div>
+          <div style={{ fontFamily: M, fontSize: 12, color: T.dim, marginTop: 10, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            {String(this.state.err?.message || this.state.err)}
+          </div>
+          <button onClick={() => { this.setState({ err: null }); }} style={{
+            marginTop: 16, background: T.amber, border: "none", borderRadius: 10, padding: "10px 20px",
+            fontFamily: D, fontWeight: 700, fontSize: 16, color: "#1A1300", cursor: "pointer", textTransform: "uppercase",
+          }}>Try again</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/* ================= API ================= */
+async function apiChat(messages, { system, useSearch = true, max_tokens = 1500 } = {}) {
   const r = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, system, useSearch, model }),
+    body: JSON.stringify({ messages, system, useSearch, max_tokens }),
   });
-  const d = await r.json();
+  const d = await r.json().catch(() => ({ error: "Bad response from server" }));
   if (d.error) throw new Error(d.error);
-  return d.text;
+  return d.text || "";
 }
 
 const CHAT_SYSTEM = `You are SlipLab, a sharp sports research agent for an experienced bettor. Always web search for current lines, confirmed lineups, injuries, and matchups before answering. Be direct and concise: the read, the number, a clear lean or swap. No hedging walls. Use betting shorthand freely (SGP, ML, juice, SOT, TNB). If something can't be confirmed, say exactly what's unconfirmed.`;
 
-// Builds a summary of the user's tracked slips so the AI knows what's been hitting
-function historyBlock() {
-  const slips = loadSlips().filter((s) => s.result);
-  if (!slips.length) return "";
-  const lines = slips.slice(0, 20).map((s) => {
-    const legs = (s.legs || []).map((l) => l.pick).join(" + ");
-    return `[${s.result.toUpperCase()}] ${legs} (${s.combined_odds || "?"})`;
-  });
-  return `\n\nUSER'S TRACKED SLIP HISTORY (learn their patterns — what leg types and odds ranges have cashed vs died for them, and factor that into recommendations):\n${lines.join("\n")}`;
-}
+const DEEP_SYSTEM = `You are SlipLab in Deep Research mode. Run multiple web searches: confirmed lineups/injuries first, then lines and line movement, then matchup splits and recent form. Structure the answer: THE READ (2-3 sentences), THE NUMBERS (key stats/lines found), THE PLAY (clear recommendation with alternatives). Be thorough but never pad. Flag anything unconfirmed.`;
 
 const PARLAY_SYSTEM = `You are a parlay construction engine. You will be given live sportsbook lines. Build from those exact numbers; use web search only to confirm lineups and injuries. Respond ONLY with raw JSON, no fences, matching:
 {"title":"short slip title","legs":[{"pick":"team/player + market + line","game":"matchup","odds":"-115","why":"one-sentence data-backed reason"}],"combined_odds":"+450","risk_note":"one sentence on correlation/risk","confidence":"A-"}`;
 
 /* ================= SLIP STORAGE ================= */
-const loadSlips = () => { try { return JSON.parse(localStorage.getItem("sliplab_slips") || "[]"); } catch { return []; } };
-const saveSlips = (s) => localStorage.setItem("sliplab_slips", JSON.stringify(s));
+const loadSlips = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem("sliplab_slips") || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((s) => s && typeof s === "object");
+  } catch { return []; }
+};
+const saveSlips = (s) => { try { localStorage.setItem("sliplab_slips", JSON.stringify(s)); } catch {} };
+
+function historyBlock() {
+  const slips = loadSlips().filter((s) => s && s.result);
+  if (!slips.length) return "";
+  const lines = slips.slice(0, 20).map((s) => {
+    const legs = (s.legs || []).map((l) => l && l.pick).filter(Boolean).join(" + ");
+    return `[${String(s.result).toUpperCase()}] ${legs} (${s.combined_odds || "?"})`;
+  });
+  return `\n\nUSER'S TRACKED SLIP HISTORY (learn their patterns — what leg types and odds ranges have cashed vs died, factor into recommendations):\n${lines.join("\n")}`;
+}
 
 /* ================= SMALL PARTS ================= */
 const Spinner = ({ label }) => (
@@ -48,27 +78,33 @@ const Spinner = ({ label }) => (
   </div>
 );
 
-const SectionTitle = ({ children }) => (
+const H1 = ({ children }) => (
   <div style={{ fontFamily: D, fontWeight: 800, fontSize: 28, textTransform: "uppercase", color: T.text }}>{children}</div>
 );
+
+const lbl = { fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, marginBottom: 6 };
 
 function Seg({ options, value, onChange }) {
   return (
     <div style={{ display: "flex", background: T.surface, border: `1px solid ${T.line}`, borderRadius: 10, padding: 3, gap: 3 }}>
       {options.map((o) => (
-        <button key={o} onClick={() => onChange(o)} style={{
+        <button key={String(o)} onClick={() => onChange(o)} style={{
           flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer",
           background: value === o ? T.amber : "transparent", color: value === o ? "#1A1300" : T.dim,
           fontFamily: D, fontWeight: 700, fontSize: 14.5, letterSpacing: 0.5, textTransform: "uppercase",
-        }}>{o}</button>
+        }}>{String(o)}</button>
       ))}
     </div>
   );
 }
 
+const usd = (p) => (p > 0 ? "+" + p : String(p));
+
 /* ================= TICKET ================= */
 function Ticket({ slip, onResult }) {
-  const status = slip.result; // undefined | "win" | "loss"
+  if (!slip) return null;
+  const legs = Array.isArray(slip.legs) ? slip.legs : [];
+  const status = slip.result;
   return (
     <div style={{ margin: "10px 0", opacity: status === "loss" ? 0.75 : 1 }}>
       <div style={{ background: T.paper, color: T.paperInk, borderRadius: "10px 10px 0 0", padding: "14px 16px 10px", boxShadow: "0 6px 24px rgba(0,0,0,0.45)", position: "relative", overflow: "hidden" }}>
@@ -84,14 +120,14 @@ function Ticket({ slip, onResult }) {
           {slip.confidence && <div style={{ fontFamily: M, fontWeight: 600, fontSize: 12, background: T.paperInk, color: T.paper, padding: "2px 8px", borderRadius: 4 }}>{slip.confidence}</div>}
         </div>
         <div style={{ borderTop: `1.5px dashed ${T.paperInk}33`, margin: "10px 0" }} />
-        {(slip.legs || []).map((leg, i) => (
-          <div key={i} style={{ padding: "8px 0", borderBottom: i < slip.legs.length - 1 ? `1px solid ${T.paperInk}18` : "none" }}>
+        {legs.map((leg, i) => (
+          <div key={i} style={{ padding: "8px 0", borderBottom: i < legs.length - 1 ? `1px solid ${T.paperInk}18` : "none" }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{leg.pick}</div>
-              <div style={{ fontFamily: M, fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", color: String(leg.odds).startsWith("-") ? "#A33" : "#1B7A46" }}>{leg.odds}</div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{leg?.pick}</div>
+              <div style={{ fontFamily: M, fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", color: String(leg?.odds || "").startsWith("-") ? "#A33" : "#1B7A46" }}>{leg?.odds}</div>
             </div>
-            <div style={{ fontSize: 11.5, color: "#5A5340", marginTop: 2 }}>{leg.game}</div>
-            <div style={{ fontSize: 12, color: "#3A3527", marginTop: 3, lineHeight: 1.4 }}>{leg.why}</div>
+            <div style={{ fontSize: 11.5, color: "#5A5340", marginTop: 2 }}>{leg?.game}</div>
+            {leg?.why && <div style={{ fontSize: 12, color: "#3A3527", marginTop: 3, lineHeight: 1.4 }}>{leg.why}</div>}
           </div>
         ))}
         <div style={{ borderTop: `1.5px dashed ${T.paperInk}33`, margin: "10px 0 8px" }} />
@@ -114,86 +150,197 @@ function Ticket({ slip, onResult }) {
   );
 }
 
-/* ================= RESEARCH TAB ================= */
-function ChatTab() {
-  const [msgs, setMsgs] = useState([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const endRef = useRef(null);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [msgs, busy]);
+/* ================= BOARD (live lines + edge leaderboard) ================= */
+const PROPS_SYSTEM = `You are a prop scoring engine. Web search today's confirmed slate, lineups, and prop lines first. Respond ONLY with raw JSON, no fences: {"props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"one short data reason"}]} — 8 to 12 props ranked by est_prob descending. est_prob is your honest estimated hit percentage (integer 1-99), never inflated.`;
 
-  const starters = ["Confirmed MLB lineups tonight?", "World Cup slate — best SOT props today", "Grade this slip: (paste your legs)"];
+function devig(outcomes) {
+  // Convert American odds to implied probs, remove the vig by normalizing
+  const imp = outcomes.map((o) => {
+    const p = Number(o.price);
+    return p > 0 ? 100 / (p + 100) : -p / (-p + 100);
+  });
+  const total = imp.reduce((a, b) => a + b, 0) || 1;
+  return outcomes.map((o, i) => ({ ...o, prob: imp[i] / total }));
+}
 
-  async function send(text) {
-    const q = (text ?? input).trim();
-    if (!q || busy) return;
-    setInput("");
-    const next = [...msgs, { role: "user", content: q }];
-    setMsgs(next); setBusy(true);
-    try {
-      const reply = await apiChat(next, { system: CHAT_SYSTEM + historyBlock(), useSearch: true });
-      setMsgs([...next, { role: "assistant", content: reply }]);
-    } catch (e) {
-      setMsgs([...next, { role: "assistant", content: "Request failed: " + e.message }]);
-    } finally { setBusy(false); }
-  }
-
+function ProbBar({ pct }) {
+  const color = pct >= 60 ? T.green : pct >= 50 ? T.amber : T.red;
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px 14px 8px" }}>
-        {msgs.length === 0 && (
-          <div style={{ marginTop: 24 }}>
-            <div style={{ fontFamily: D, fontWeight: 800, fontSize: 34, lineHeight: 1.05, textTransform: "uppercase", color: T.text }}>
-              Ask the desk<span style={{ color: T.amber }}>.</span>
-            </div>
-            <div style={{ color: T.dim, fontSize: 13.5, marginTop: 8, lineHeight: 1.5 }}>
-              Live-searched lines, lineups, injuries, matchup reads — or paste a full slip for a leg-by-leg grade.
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 20 }}>
-              {starters.map((s) => (
-                <button key={s} onClick={() => s.includes("paste") ? setInput("Grade this slip: ") : send(s)} style={{
-                  textAlign: "left", background: T.surface, border: `1px solid ${T.line}`, color: T.text,
-                  padding: "11px 14px", borderRadius: 10, fontSize: 13.5, cursor: "pointer",
-                }}>
-                  <span style={{ color: T.amber, marginRight: 8, fontFamily: M }}>›</span>{s}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {msgs.map((m, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 10 }}>
-            <div style={{
-              maxWidth: "88%", background: m.role === "user" ? T.amber : T.surface,
-              color: m.role === "user" ? "#1A1300" : T.text, padding: "10px 13px",
-              borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
-              fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap",
-              border: m.role === "user" ? "none" : `1px solid ${T.line}`,
-            }}>{m.content}</div>
-          </div>
-        ))}
-        {busy && <Spinner label="Searching live data…" />}
-        <div ref={endRef} />
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ flex: 1, height: 5, background: T.surface2, borderRadius: 99, overflow: "hidden" }}>
+        <div style={{ width: Math.min(pct, 100) + "%", height: "100%", background: color }} />
       </div>
-      <div style={{ padding: "10px 14px 14px", borderTop: `1px solid ${T.line}` }}>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="Ask about props, lineups, matchups…" style={{
-              flex: 1, background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10,
-              padding: "11px 13px", color: T.text, fontSize: 14, outline: "none",
-            }} />
-          <button onClick={() => send()} disabled={busy} style={{
-            background: T.amber, border: "none", borderRadius: 10, padding: "0 18px",
-            fontFamily: D, fontWeight: 700, fontSize: 16, letterSpacing: 0.5, color: "#1A1300",
-            cursor: "pointer", opacity: busy ? 0.5 : 1, textTransform: "uppercase",
-          }}>Ask</button>
-        </div>
-      </div>
+      <span style={{ fontFamily: M, fontWeight: 600, fontSize: 13, color, minWidth: 38, textAlign: "right" }}>{pct}%</span>
     </div>
   );
 }
 
-/* ================= PARLAY TAB ================= */
+function BoardTab({ onAsk }) {
+  const [mode, setMode] = useState("Edge");
+  const [sport, setSport] = useState("mlb");
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [props_, setProps] = useState(null);
+  const [propBusy, setPropBusy] = useState(false);
+  const [propErr, setPropErr] = useState("");
+
+  useEffect(() => {
+    let dead = false;
+    setLoading(true); setErr(""); setData(null);
+    fetch("/api/odds?sport=" + sport)
+      .then((r) => r.json())
+      .then((d) => { if (!dead) { d.error ? setErr(d.error) : setData(d); } })
+      .catch((e) => !dead && setErr(e.message))
+      .finally(() => !dead && setLoading(false));
+    return () => { dead = true; };
+  }, [sport]);
+
+  const games = data?.games || [];
+
+  // Build the edge leaderboard: every ML side, devigged, ranked by true win probability
+  const edge = [];
+  for (const g of games) {
+    const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
+    const ml = fd?.markets?.find((m) => m.type === "h2h");
+    if (ml?.outcomes?.length >= 2) {
+      for (const o of devig(ml.outcomes)) {
+        edge.push({ pick: o.name + " ML", game: g.away + " @ " + g.home, odds: usd(o.price), pct: Math.round(o.prob * 100), start: g.start });
+      }
+    }
+  }
+  edge.sort((a, b) => b.pct - a.pct);
+
+  async function scoreProps() {
+    if (propBusy) return;
+    setPropBusy(true); setPropErr("");
+    try {
+      const raw = await apiChat(
+        [{ role: "user", content: `Score today's best ${sport.toUpperCase()} player props. Return ONLY the JSON.` }],
+        { system: PROPS_SYSTEM, useSearch: true, max_tokens: 2500 }
+      );
+      const clean = String(raw).replace(/```json|```/g, "").trim();
+      const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
+      if (a < 0 || b < 0) throw new Error("No scores returned — run it again");
+      const parsed = JSON.parse(clean.slice(a, b + 1));
+      const list = (parsed.props || []).filter((p) => p && p.player).sort((x, y) => (y.est_prob || 0) - (x.est_prob || 0));
+      setProps(list);
+    } catch (e) {
+      setPropErr("Scoring failed — run it again. (" + e.message + ")");
+    } finally { setPropBusy(false); }
+  }
+
+  return (
+    <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
+      <H1>The board</H1>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "10px 0 12px" }}>
+        <Seg options={["Edge", "Lines"]} value={mode} onChange={setMode} />
+        <Seg options={["mlb", "worldcup", "nba", "nfl"]} value={sport} onChange={setSport} />
+      </div>
+
+      {loading && <Spinner label="Pulling the board…" />}
+      {err && <div style={{ color: T.red, fontSize: 13 }}>{err}</div>}
+
+      {mode === "Edge" && !loading && !err && (
+        <div>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, margin: "4px 0 8px" }}>
+            Win probability leaderboard · vig removed from live FanDuel lines
+          </div>
+          {edge.length === 0 && <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 20 }}>No games on this board right now.</div>}
+          {edge.map((e, i) => (
+            <button key={i} onClick={() => onAsk(`Is ${e.pick} (${e.game}) worth anchoring a slip? Lines, lineups, injuries, best angle.`)} style={{
+              display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
+              borderRadius: 12, padding: "11px 14px", marginBottom: 7, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
+                  <span style={{ fontFamily: M, color: T.dim, fontSize: 11, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
+                  {e.pick}
+                </div>
+                <div style={{ fontFamily: M, fontSize: 12.5, color: String(e.odds).startsWith("-") ? T.red : T.green }}>{e.odds}</div>
+              </div>
+              <div style={{ fontSize: 11, color: T.dim, margin: "3px 0 6px" }}>{e.game}</div>
+              <ProbBar pct={e.pct} />
+            </button>
+          ))}
+
+          <div style={{ marginTop: 18, borderTop: `1px solid ${T.line}`, paddingTop: 14 }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, marginBottom: 8 }}>
+              AI prop scores · model-estimated hit % from live research
+            </div>
+            <button onClick={scoreProps} disabled={propBusy} style={{
+              width: "100%", background: T.amber, border: "none", borderRadius: 12, padding: "12px 0",
+              fontFamily: D, fontWeight: 800, fontSize: 17, letterSpacing: 1, color: "#1A1300",
+              cursor: "pointer", textTransform: "uppercase", opacity: propBusy ? 0.5 : 1,
+            }}>{propBusy ? "Scoring the slate…" : props_ ? "Re-score props" : "Score today's props"}</button>
+            {propBusy && <Spinner label="Searching lineups, lines, and matchups…" />}
+            {propErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{propErr}</div>}
+            {(props_ || []).map((p, i) => (
+              <button key={i} onClick={() => onAsk(`Deep read: ${p.player} ${p.prop} (${p.game}). Worth a leg tonight?`)} style={{
+                display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
+                borderRadius: 12, padding: "11px 14px", marginTop: 7, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                  <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
+                    <span style={{ fontFamily: M, color: T.dim, fontSize: 11, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
+                    {p.player} · {p.prop}
+                  </div>
+                  {p.odds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(p.odds).startsWith("-") ? T.red : T.green }}>{p.odds}</div>}
+                </div>
+                <div style={{ fontSize: 11, color: T.dim, margin: "3px 0 6px" }}>{p.game}{p.why ? " — " + p.why : ""}</div>
+                <ProbBar pct={Math.round(p.est_prob || 0)} />
+              </button>
+            ))}
+            {props_ && (
+              <div style={{ fontSize: 11, color: T.dim, marginTop: 8, lineHeight: 1.5 }}>
+                AI estimates, not sportsbook-implied — always check the live number on FanDuel before locking.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {mode === "Lines" && !loading && !err && (
+        <div>
+          {games.length === 0 && <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 30 }}>No games on this board right now.</div>}
+          {games.map((g) => {
+            const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
+            const ml = fd?.markets?.find((m) => m.type === "h2h");
+            const tot = fd?.markets?.find((m) => m.type === "totals");
+            const when = g.start ? new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+            return (
+              <button key={g.id} onClick={() => onAsk(`Full read on ${g.away} @ ${g.home} — lines, lineups, injuries, best angle.`)} style={{
+                display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
+                borderRadius: 12, padding: "12px 14px", marginBottom: 8, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <div style={{ color: T.text, fontSize: 14, fontWeight: 600 }}>{g.away} <span style={{ color: T.dim }}>@</span> {g.home}</div>
+                  <div style={{ fontFamily: M, fontSize: 11, color: T.dim }}>{when}</div>
+                </div>
+                <div style={{ display: "flex", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
+                  {(ml?.outcomes || []).map((o, i) => (
+                    <div key={i} style={{ fontFamily: M, fontSize: 12.5 }}>
+                      <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
+                      <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
+                    </div>
+                  ))}
+                  {tot?.outcomes?.[0]?.point != null && (
+                    <div style={{ fontFamily: M, fontSize: 12.5 }}>
+                      <span style={{ color: T.dim }}>O/U </span>
+                      <span style={{ color: T.amber }}>{tot.outcomes[0].point}</span>
+                    </div>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================= BUILDER ================= */
 function ParlayTab({ onSaveSlip }) {
   const [sport, setSport] = useState("MLB");
   const [legs, setLegs] = useState(3);
@@ -207,35 +354,35 @@ function ParlayTab({ onSaveSlip }) {
     if (busy) return;
     setBusy(true); setErr("");
     try {
-      // 1) Pull real FanDuel/DK lines from our odds endpoint
       setPhase("Pulling live FanDuel lines…");
-      const sportKey = sport === "MLB" ? "mlb" : sport === "World Cup" ? "worldcup" : "mlb";
+      const sportKey = sport === "World Cup" ? "worldcup" : "mlb";
       let linesBlock = "No live lines available — confirm current odds via search.";
       try {
         const r = await fetch("/api/odds?sport=" + sportKey);
         const d = await r.json();
-        if (d.games?.length) {
+        if (Array.isArray(d.games) && d.games.length) {
           linesBlock = d.games.slice(0, 12).map((g) => {
-            const fd = g.books.find((b) => /fanduel/i.test(b.book)) || g.books[0];
-            const ml = fd?.markets.find((m) => m.type === "h2h");
-            const mlStr = ml ? ml.outcomes.map((o) => `${o.name} ${o.price > 0 ? "+" : ""}${o.price}`).join(" / ") : "";
+            const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
+            const ml = fd?.markets?.find((m) => m.type === "h2h");
+            const mlStr = ml ? ml.outcomes.map((o) => `${o.name} ${usd(o.price)}`).join(" / ") : "";
             return `${g.away} @ ${g.home} — ML: ${mlStr}`;
           }).join("\n");
         }
-      } catch { /* fall through with search-only */ }
+      } catch {}
 
-      // 2) Build the slip from real numbers
       setPhase("Confirming lineups & building…");
       const prompt = `LIVE LINES:\n${linesBlock}\n\nBuild a ${legs}-leg ${style.toLowerCase()} parlay for today's ${sport} slate using these lines. ${
         style === "Safe" ? "Target +150 to +250 combined, high-floor legs." :
         style === "Balanced" ? "Target +300 to +500 combined." :
         "Target +600 or longer with at least one upside prop."
       } Return ONLY the JSON.`;
-      const raw = await apiChat([{ role: "user", content: prompt }], { system: PARLAY_SYSTEM + historyBlock(), useSearch: true });
-      const clean = raw.replace(/```json|```/g, "").trim();
-      const slip = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+      const raw = await apiChat([{ role: "user", content: prompt }], { system: PARLAY_SYSTEM + historyBlock(), useSearch: true, max_tokens: 2000 });
+      const clean = String(raw).replace(/```json|```/g, "").trim();
+      const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
+      if (a < 0 || b < 0) throw new Error("Model didn't return a slip — try again");
+      const slip = JSON.parse(clean.slice(a, b + 1));
       slip.created = new Date().toISOString();
-      setSlips([slip, ...slips]);
+      setSlips((s) => [slip, ...s]);
       onSaveSlip(slip);
     } catch (e) {
       setErr("Couldn't build that slip — run it again. (" + e.message + ")");
@@ -244,9 +391,9 @@ function ParlayTab({ onSaveSlip }) {
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
-      <SectionTitle>Build a slip</SectionTitle>
+      <H1>Build a slip</H1>
       <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14 }}>
-        <div><div style={lbl}>Slate</div><Seg options={["MLB", "World Cup", "Mixed"]} value={sport} onChange={setSport} /></div>
+        <div><div style={lbl}>Slate</div><Seg options={["MLB", "World Cup"]} value={sport} onChange={setSport} /></div>
         <div><div style={lbl}>Legs</div><Seg options={[2, 3, 4, 5]} value={legs} onChange={setLegs} /></div>
         <div><div style={lbl}>Risk</div><Seg options={["Safe", "Balanced", "Longshot"]} value={style} onChange={setStyle} /></div>
         <button onClick={build} disabled={busy} style={{
@@ -268,27 +415,30 @@ function ParlayTab({ onSaveSlip }) {
     </div>
   );
 }
-const lbl = { fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, marginBottom: 6 };
 
-/* ================= TRENDING TAB (Polymarket) ================= */
+/* ================= TRENDING ================= */
 function TrendingTab() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
   const [filter, setFilter] = useState("All");
 
   useEffect(() => {
-    fetch("/api/trending").then((r) => r.json()).then((d) => d.error ? setErr(d.error) : setData(d)).catch((e) => setErr(e.message));
+    let dead = false;
+    fetch("/api/trending").then((r) => r.json())
+      .then((d) => !dead && (d.error ? setErr(d.error) : setData(d)))
+      .catch((e) => !dead && setErr(e.message));
+    return () => { dead = true; };
   }, []);
 
   const SPORT_WORDS = /world cup|mlb|nba|nfl|nhl|match|game|win|beat|score|vs\.?|champion|finals|cup|series|goal/i;
-  const markets = (data?.markets || []).filter((m) => filter === "All" || SPORT_WORDS.test(m.question));
+  const markets = (data?.markets || []).filter((m) => filter === "All" || SPORT_WORDS.test(m.question || ""));
   const fmt = (n) => n >= 1e6 ? "$" + (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? "$" + Math.round(n / 1e3) + "K" : "$" + n;
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
-      <SectionTitle>What the market's on</SectionTitle>
+      <H1>What the market's on</H1>
       <div style={{ color: T.dim, fontSize: 12.5, margin: "6px 0 12px" }}>
-        Live Polymarket volume — where real money is actually going, ranked by 24h action.
+        Live Polymarket volume — where real money is going, ranked by 24h action.
       </div>
       <Seg options={["All", "Sports"]} value={filter} onChange={setFilter} />
       <div style={{ marginTop: 14 }}>
@@ -303,7 +453,7 @@ function TrendingTab() {
               <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{m.question}</div>
               <div style={{ fontFamily: M, color: T.amber, fontSize: 12, whiteSpace: "nowrap" }}>{fmt(m.volume24h)}<span style={{ color: T.dim }}> /24h</span></div>
             </div>
-            {m.outcomes?.length > 0 && (
+            {Array.isArray(m.outcomes) && m.outcomes.length > 0 && (
               <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
                 {m.outcomes.slice(0, 3).map((o, i) => (
                   <div key={i} style={{ fontFamily: M, fontSize: 12 }}>
@@ -320,7 +470,7 @@ function TrendingTab() {
   );
 }
 
-/* ================= MY SLIPS TAB ================= */
+/* ================= MY SLIPS ================= */
 function SlipsTab({ slips, setSlips }) {
   const [showImport, setShowImport] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -328,7 +478,7 @@ function SlipsTab({ slips, setSlips }) {
   const [importing, setImporting] = useState(false);
   const [impErr, setImpErr] = useState("");
 
-  const graded = slips.filter((s) => s.result);
+  const graded = slips.filter((s) => s && s.result);
   const wins = graded.filter((s) => s.result === "win").length;
   const rate = graded.length ? Math.round((wins / graded.length) * 100) : null;
 
@@ -343,10 +493,12 @@ function SlipsTab({ slips, setSlips }) {
     try {
       const raw = await apiChat(
         [{ role: "user", content: `Parse this bet slip into JSON. Respond ONLY raw JSON: {"title":"short title","legs":[{"pick":"...","game":"...","odds":"..."}],"combined_odds":"..."}\n\nSLIP:\n${pasteText}` }],
-        { useSearch: false }
+        { useSearch: false, max_tokens: 1000 }
       );
-      const clean = raw.replace(/```json|```/g, "").trim();
-      const slip = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+      const clean = String(raw).replace(/```json|```/g, "").trim();
+      const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
+      if (a < 0 || b < 0) throw new Error("Couldn't read that slip");
+      const slip = JSON.parse(clean.slice(a, b + 1));
       slip.result = pasteResult;
       slip.created = new Date().toISOString();
       slip.imported = true;
@@ -360,15 +512,11 @@ function SlipsTab({ slips, setSlips }) {
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
-      <SectionTitle>My slips</SectionTitle>
+      <H1>My slips</H1>
       <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-        {[
-          ["Printed", slips.length],
-          ["Cashed", wins],
-          ["Hit rate", rate == null ? "—" : rate + "%"],
-        ].map(([k, v]) => (
+        {[["Printed", slips.length], ["Cashed", wins], ["Hit rate", rate == null ? "—" : rate + "%"]].map(([k, v]) => (
           <div key={k} style={{ flex: 1, background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12, padding: "10px 0", textAlign: "center" }}>
-            <div style={{ fontFamily: M, fontWeight: 600, fontSize: 20, color: k === "Hit rate" && rate >= 50 ? T.green : T.text }}>{v}</div>
+            <div style={{ fontFamily: M, fontWeight: 600, fontSize: 20, color: k === "Hit rate" && rate != null && rate >= 50 ? T.green : T.text }}>{v}</div>
             <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: 1, color: T.dim, marginTop: 2 }}>{k}</div>
           </div>
         ))}
@@ -383,7 +531,7 @@ function SlipsTab({ slips, setSlips }) {
       {showImport && (
         <div style={{ background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12, padding: 12, marginTop: 10 }}>
           <div style={{ fontSize: 12.5, color: T.dim, marginBottom: 8, lineHeight: 1.5 }}>
-            Paste legs from FanDuel (copy from bet history) — the AI parses it into a ticket. Log your old wins and losses so recommendations learn what hits for you.
+            Paste legs from your FanDuel bet history — the AI parses it into a ticket. Log old wins and losses so recommendations learn what hits for you.
           </div>
           <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={4}
             placeholder={"e.g.\nYordan Alvarez to hit a HR +320\nDodgers ML -145\nCombined +510"}
@@ -414,51 +562,173 @@ function SlipsTab({ slips, setSlips }) {
 
 /* ================= APP SHELL ================= */
 export default function App() {
+  return <Boundary><AppInner /></Boundary>;
+}
+
+function AppInner() {
   const [tab, setTab] = useState("chat");
   const [slips, setSlips] = useState(loadSlips);
+  const [pendingAsk, setPendingAsk] = useState("");
 
   function addSlip(slip) {
-    const next = [slip, ...slips];
-    setSlips(next); saveSlips(next);
+    setSlips((prev) => { const next = [slip, ...prev]; saveSlips(next); return next; });
   }
 
-  const TABS = [["chat", "Research"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "My Slips"]];
+  // Board → Desk handoff
+  function askFromBoard(q) { setPendingAsk(q); setTab("chat"); }
+
+  const TABS = [["chat", "Desk"], ["board", "Board"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "Slips"]];
 
   return (
-    <div style={{ height: "100dvh", display: "flex", flexDirection: "column", background: T.bg, fontFamily: "'Inter', sans-serif" }}>
+    <div style={{ minHeight: "100dvh", display: "flex", justifyContent: "center", background: "#080A0E", fontFamily: "'Inter', sans-serif" }}>
       <style>{`
         * { box-sizing: border-box; margin: 0; }
-        body { background: ${T.bg}; }
-        input::placeholder { color: ${T.dim}99; }
+        body { background: #080A0E; }
+        input::placeholder, textarea::placeholder { color: ${T.dim}99; }
         .pulse { animation: pulse 1.1s ease-in-out infinite; display: inline-block; }
         @keyframes pulse { 0%,100% { opacity:.35 } 50% { opacity:1 } }
         @media (prefers-reduced-motion: reduce) { .pulse { animation: none } }
-        button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid ${T.amber}; outline-offset: 2px; }
+        button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visible { outline: 2px solid ${T.amber}; outline-offset: 2px; }
       `}</style>
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px 10px", borderBottom: `1px solid ${T.line}` }}>
-        <div style={{ fontFamily: D, fontWeight: 800, fontSize: 22, letterSpacing: 1.5, color: T.text, textTransform: "uppercase" }}>
-          Slip<span style={{ color: T.amber }}>Lab</span>
+      <div style={{ width: "100%", maxWidth: 680, height: "100dvh", display: "flex", flexDirection: "column", background: T.bg, borderLeft: `1px solid ${T.line}`, borderRight: `1px solid ${T.line}` }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px 10px", borderBottom: `1px solid ${T.line}` }}>
+          <div style={{ fontFamily: D, fontWeight: 800, fontSize: 22, letterSpacing: 1.5, color: T.text, textTransform: "uppercase" }}>
+            Slip<span style={{ color: T.amber }}>Lab</span>
+          </div>
+          <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, letterSpacing: 1 }}>LIVE DATA</div>
         </div>
-        <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, letterSpacing: 1 }}>LIVE DATA</div>
-      </div>
 
-      <div style={{ flex: 1, minHeight: 0 }}>
-        {tab === "chat" && <ChatTab />}
-        {tab === "parlay" && <ParlayTab onSaveSlip={addSlip} />}
-        {tab === "trend" && <TrendingTab />}
-        {tab === "slips" && <SlipsTab slips={slips} setSlips={setSlips} />}
-      </div>
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <Boundary>
+            {tab === "chat" && <ChatTabCore key={pendingAsk || "chat"} initialQuestion={pendingAsk} onConsumed={() => setPendingAsk("")} />}
+            {tab === "board" && <BoardTab onAsk={askFromBoard} />}
+            {tab === "parlay" && <ParlayTab onSaveSlip={addSlip} />}
+            {tab === "trend" && <TrendingTab />}
+            {tab === "slips" && <SlipsTab slips={slips} setSlips={setSlips} />}
+          </Boundary>
+        </div>
 
-      <div style={{ display: "flex", borderTop: `1px solid ${T.line}`, background: T.bg, paddingBottom: "env(safe-area-inset-bottom)" }}>
-        {TABS.map(([k, label]) => (
-          <button key={k} onClick={() => setTab(k)} style={{
-            flex: 1, padding: "12px 0 10px", background: "transparent", border: "none", cursor: "pointer",
-            fontFamily: D, fontWeight: 700, fontSize: 14.5, letterSpacing: 1, textTransform: "uppercase",
-            color: tab === k ? T.amber : T.dim,
-            borderTop: tab === k ? `2px solid ${T.amber}` : "2px solid transparent",
-          }}>{label}</button>
+        <div style={{ display: "flex", borderTop: `1px solid ${T.line}`, background: T.bg, paddingBottom: "env(safe-area-inset-bottom)" }}>
+          {TABS.map(([k, label]) => (
+            <button key={k} onClick={() => setTab(k)} style={{
+              flex: 1, padding: "12px 0 10px", background: "transparent", border: "none", cursor: "pointer",
+              fontFamily: D, fontWeight: 700, fontSize: 14, letterSpacing: 1, textTransform: "uppercase",
+              color: tab === k ? T.amber : T.dim,
+              borderTop: tab === k ? `2px solid ${T.amber}` : "2px solid transparent",
+            }}>{label}</button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatTabCore({ initialQuestion, onConsumed }) {
+  const [msgs, setMsgs] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [deep, setDeep] = useState(false);
+  const endRef = useRef(null);
+  const started = useRef(false);
+
+  useEffect(() => { try { endRef.current?.scrollIntoView({ behavior: "smooth" }); } catch {} }, [msgs, busy]);
+
+  async function send(text) {
+    const q = String(text ?? input).trim();
+    if (!q || busy) return;
+    setInput("");
+    const next = [...msgs, { role: "user", content: q }];
+    setMsgs(next); setBusy(true);
+    try {
+      const reply = await apiChat(next, {
+        system: (deep ? DEEP_SYSTEM : CHAT_SYSTEM) + historyBlock(),
+        useSearch: true,
+        max_tokens: deep ? 3000 : 1500,
+      });
+      setMsgs((m) => [...m, { role: "assistant", content: reply || "(empty response)" }]);
+    } catch (e) {
+      setMsgs((m) => [...m, { role: "assistant", content: "Request failed: " + (e && e.message ? e.message : String(e)) }]);
+    } finally { setBusy(false); }
+  }
+
+  // Fire a handed-off question exactly once, safely
+  useEffect(() => {
+    if (initialQuestion && !started.current) {
+      started.current = true;
+      send(initialQuestion);
+      if (typeof onConsumed === "function") onConsumed();
+    }
+    // eslint-disable-next-line
+  }, [initialQuestion]);
+
+  const starters = [
+    "Confirmed MLB lineups tonight?",
+    "World Cup slate — best SOT props today",
+    "Best ML anchors for a 3-leg tonight",
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px 14px 8px" }}>
+        {msgs.length === 0 && (
+          <div style={{ marginTop: 20 }}>
+            <div style={{ fontFamily: D, fontWeight: 800, fontSize: 34, lineHeight: 1.05, textTransform: "uppercase", color: T.text }}>
+              Ask the desk<span style={{ color: T.amber }}>.</span>
+            </div>
+            <div style={{ color: T.dim, fontSize: 13.5, marginTop: 8, lineHeight: 1.5 }}>
+              Live-searched lines, lineups, injuries, matchup reads — or paste a full slip for a leg-by-leg grade.
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
+              {starters.map((s) => (
+                <button key={s} onClick={() => send(s)} style={{
+                  textAlign: "left", background: T.surface, border: `1px solid ${T.line}`, color: T.text,
+                  padding: "11px 14px", borderRadius: 10, fontSize: 13.5, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+                }}>
+                  <span style={{ color: T.amber, marginRight: 8, fontFamily: M }}>›</span>{s}
+                </button>
+              ))}
+              <button onClick={() => setInput("Grade this slip: ")} style={{
+                textAlign: "left", background: T.surface, border: `1px solid ${T.line}`, color: T.text,
+                padding: "11px 14px", borderRadius: 10, fontSize: 13.5, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+              }}>
+                <span style={{ color: T.amber, marginRight: 8, fontFamily: M }}>›</span>Grade this slip (paste your legs)
+              </button>
+            </div>
+          </div>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 10 }}>
+            <div style={{
+              maxWidth: "88%", background: m.role === "user" ? T.amber : T.surface,
+              color: m.role === "user" ? "#1A1300" : T.text, padding: "10px 13px",
+              borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
+              fontSize: 14, lineHeight: 1.55, whiteSpace: "pre-wrap",
+              border: m.role === "user" ? "none" : `1px solid ${T.line}`,
+            }}>{m.content}</div>
+          </div>
         ))}
+        {busy && <Spinner label={deep ? "Deep research — multiple searches running…" : "Searching live data…"} />}
+        <div ref={endRef} />
+      </div>
+      <div style={{ padding: "10px 14px 14px", borderTop: `1px solid ${T.line}` }}>
+        <button onClick={() => setDeep(!deep)} style={{
+          marginBottom: 8, background: deep ? T.amber : "transparent", color: deep ? "#1A1300" : T.dim,
+          border: `1.5px solid ${deep ? T.amber : T.line}`, borderRadius: 99, padding: "5px 14px",
+          fontFamily: D, fontWeight: 700, fontSize: 13, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer",
+        }}>◆ Deep research {deep ? "ON" : "OFF"}</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()}
+            placeholder="Ask about props, lineups, matchups…" style={{
+              flex: 1, background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10,
+              padding: "11px 13px", color: T.text, fontSize: 14, outline: "none", fontFamily: "'Inter', sans-serif",
+            }} />
+          <button onClick={() => send()} disabled={busy} style={{
+            background: T.amber, border: "none", borderRadius: 10, padding: "0 18px",
+            fontFamily: D, fontWeight: 700, fontSize: 16, letterSpacing: 0.5, color: "#1A1300",
+            cursor: "pointer", opacity: busy ? 0.5 : 1, textTransform: "uppercase",
+          }}>Ask</button>
+        </div>
       </div>
     </div>
   );
