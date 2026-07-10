@@ -124,6 +124,37 @@ function Seg({ options, value, onChange }) {
 
 const usd = (p) => (p > 0 ? "+" + p : String(p));
 
+function fmtWhen(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleString([], { weekday: "short", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
+  } catch { return ""; }
+}
+
+// Pull a specific book's moneyline outcomes from a game object, if present
+function bookML(g, nameRegex) {
+  const book = (g.books || []).find((b) => nameRegex.test(b.book));
+  const ml = book?.markets?.find((m) => m.type === "h2h");
+  return ml?.outcomes || null;
+}
+
+// Best-effort match of a free-text "Team A @ Team B" string to a game object
+function findGameForText(text, games) {
+  if (!text) return null;
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  const t = norm(text);
+  for (const g of games) {
+    const away = norm(g.away), home = norm(g.home);
+    if (!away || !home) continue;
+    if (t.includes(away) || t.includes(home) ||
+        away.split(" ").some((w) => w.length > 3 && t.includes(w)) ||
+        home.split(" ").some((w) => w.length > 3 && t.includes(w))) {
+      return g;
+    }
+  }
+  return null;
+}
+
 /* ================= TICKET ================= */
 const LIVE_SPORT_KEYS = ["mlb", "nba", "nfl", "nhl", "worldcup"];
 
@@ -233,7 +264,7 @@ function Ticket({ slip, onResult }) {
 }
 
 /* ================= BOARD (live lines + edge leaderboard) ================= */
-const PROPS_SYSTEM = `You are a professional player-prop analyst ranking today's slate. FIRST web search today's date and which games are actually being played today in the requested sport. Then for each candidate prop, work the full methodology: confirmed lineups/starters, matchup splits (batter/pitcher handedness, defensive matchup), park factors and weather (wind speed/direction, temp — critical for MLB totals/power props), bullpen or rotation fatigue, rest/travel, and current line movement. Convert each prop's odds to implied probability and only include it if your honest estimate beats the implied number — if a popular player's line doesn't clear that bar, leave them off in favor of a real edge elsewhere, even a less famous name. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today, wind blowing out at Wrigley","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"the single strongest factor — matchup, weather, form, or park"}]} — return 10 to 14 props ranked by est_prob descending, spread across multiple games. est_prob is a calibrated number you'd stake your own money on being right, never inflated for excitement. If no games today, return {"slate_note":"No games today","props":[]}.${ANALYST_CORE}`;
+const PROPS_SYSTEM = `You are a professional player-prop analyst ranking today's slate. FIRST web search today's date and which games are actually being played today in the requested sport. Then for each candidate prop, work the full methodology: confirmed lineups/starters, matchup splits (batter/pitcher handedness, defensive matchup), park factors and weather (wind speed/direction, temp — critical for MLB totals/power props), bullpen or rotation fatigue, rest/travel, and current line movement. If you can find the same prop line at both FanDuel and DraftKings, note both in the odds field like "FD -115 / DK -120" — otherwise just give the one you found. Convert each prop's odds to implied probability and only include it if your honest estimate beats the implied number — if a popular player's line doesn't clear that bar, leave them off in favor of a real edge elsewhere, even a less famous name. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today, wind blowing out at Wrigley","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"the single strongest factor — matchup, weather, form, or park"}]} — return 10 to 14 props ranked by est_prob descending, spread across multiple games. est_prob is a calibrated number you'd stake your own money on being right, never inflated for excitement. If no games today, return {"slate_note":"No games today","props":[]}.${ANALYST_CORE}`;
 
 function devig(outcomes) {
   // Convert American odds to implied probs, remove the vig by normalizing
@@ -286,9 +317,15 @@ function BoardTab({ onAsk }) {
   for (const g of games) {
     const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
     const ml = fd?.markets?.find((m) => m.type === "h2h");
+    const dkOutcomes = bookML(g, /draftkings/i);
     if (ml?.outcomes?.length >= 2) {
       for (const o of devig(ml.outcomes)) {
-        edge.push({ pick: o.name + " ML", game: g.away + " @ " + g.home, odds: usd(o.price), pct: Math.round(o.prob * 100), start: g.start });
+        const dkMatch = dkOutcomes?.find((d) => d.name === o.name);
+        edge.push({
+          pick: o.name + " ML", game: g.away + " @ " + g.home, odds: usd(o.price),
+          dkOdds: dkMatch ? usd(dkMatch.price) : null,
+          pct: Math.round(o.prob * 100), start: g.start,
+        });
       }
     }
   }
@@ -317,6 +354,7 @@ function BoardTab({ onAsk }) {
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>The board</H1>
+      <div style={{ color: T.dim, fontSize: 11.5, margin: "4px 0 2px" }}>FanDuel & DraftKings compared where available · every pick shows game time</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "10px 0 12px" }}>
         <Seg options={["Edge", "Props", "Lines"]} value={mode} onChange={setMode} />
         <Seg options={["mlb", "worldcup", "nba", "nfl", "nhl"]} value={sport} onChange={setSport} />
@@ -338,22 +376,29 @@ function BoardTab({ onAsk }) {
           {propBusy && <Spinner label="Checking today's games, lineups, and lines…" />}
           {propErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{propErr}</div>}
           {slateNote && <div style={{ fontFamily: M, fontSize: 12, color: T.green, margin: "10px 0 4px" }}>● {slateNote}</div>}
-          {(props_ || []).map((p, i) => (
-            <button key={i} onClick={() => onAsk(`Deep read: ${p.player} ${p.prop} (${p.game}). Worth a leg today?`)} style={{
-              display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
-              borderRadius: 12, padding: "11px 14px", marginTop: 8, cursor: "pointer", fontFamily: "'Inter', sans-serif",
-            }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
-                  <span style={{ fontFamily: M, color: T.amber, fontSize: 12, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
-                  {p.player} · {p.prop}
+          {(props_ || []).map((p, i) => {
+            const gameMatch = findGameForText(p.game, games);
+            const when = fmtWhen(gameMatch?.start);
+            return (
+              <button key={i} onClick={() => onAsk(`Pull full stats and matchup context for ${p.player} — ${p.prop} (${p.game}). Show recent performance trends, the specific matchup/split that supports it, and explain exactly why it should hit. Worth a leg today?`)} style={{
+                display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
+                borderRadius: 12, padding: "11px 14px", marginTop: 8, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+                  <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
+                    <span style={{ fontFamily: M, color: T.amber, fontSize: 12, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
+                    {p.player} · {p.prop}
+                  </div>
+                  {p.odds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(p.odds).startsWith("-") ? T.red : T.green }}>{p.odds}</div>}
                 </div>
-                {p.odds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(p.odds).startsWith("-") ? T.red : T.green }}>{p.odds}</div>}
-              </div>
-              <div style={{ fontSize: 11, color: T.dim, margin: "3px 0 6px" }}>{p.game}{p.why ? " — " + p.why : ""}</div>
-              <ProbBar pct={Math.round(p.est_prob || 0)} />
-            </button>
-          ))}
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, margin: "3px 0 6px" }}>
+                  <div style={{ fontSize: 11, color: T.dim }}>{p.game}{p.why ? " — " + p.why : ""}</div>
+                  {when && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, whiteSpace: "nowrap" }}>{when}</div>}
+                </div>
+                <ProbBar pct={Math.round(p.est_prob || 0)} />
+              </button>
+            );
+          })}
           {props_ && props_.length > 0 && (
             <div style={{ fontSize: 11, color: T.dim, marginTop: 10, lineHeight: 1.5 }}>
               AI estimates from live research, not sportsbook-implied — always confirm the number on FanDuel before locking.
@@ -372,7 +417,7 @@ function BoardTab({ onAsk }) {
           </div>
           {edge.length === 0 && <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 20 }}>No games on this board right now.</div>}
           {edge.map((e, i) => (
-            <button key={i} onClick={() => onAsk(`Is ${e.pick} (${e.game}) worth anchoring a slip? Lines, lineups, injuries, best angle.`)} style={{
+            <button key={i} onClick={() => onAsk(`Pull full stats and reasoning for ${e.pick} (${e.game}) — recent form, matchup, injuries, weather if relevant. Is it worth anchoring a slip?`)} style={{
               display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
               borderRadius: 12, padding: "11px 14px", marginBottom: 7, cursor: "pointer", fontFamily: "'Inter', sans-serif",
             }}>
@@ -381,9 +426,15 @@ function BoardTab({ onAsk }) {
                   <span style={{ fontFamily: M, color: T.dim, fontSize: 11, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
                   {e.pick}
                 </div>
-                <div style={{ fontFamily: M, fontSize: 12.5, color: String(e.odds).startsWith("-") ? T.red : T.green }}>{e.odds}</div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: M, fontSize: 12.5, color: String(e.odds).startsWith("-") ? T.red : T.green }}>FD {e.odds}</div>
+                  {e.dkOdds && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, marginTop: 1 }}>DK {e.dkOdds}</div>}
+                </div>
               </div>
-              <div style={{ fontSize: 11, color: T.dim, margin: "3px 0 6px" }}>{e.game}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, margin: "3px 0 6px" }}>
+                <div style={{ fontSize: 11, color: T.dim }}>{e.game}</div>
+                {e.start && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, whiteSpace: "nowrap" }}>{fmtWhen(e.start)}</div>}
+              </div>
               <ProbBar pct={e.pct} />
             </button>
           ))}
@@ -400,7 +451,8 @@ function BoardTab({ onAsk }) {
             const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
             const ml = fd?.markets?.find((m) => m.type === "h2h");
             const tot = fd?.markets?.find((m) => m.type === "totals");
-            const when = g.start ? new Date(g.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+            const dkOutcomes = bookML(g, /draftkings/i);
+            const when = fmtWhen(g.start);
             return (
               <button key={g.id} onClick={() => onAsk(`Full read on ${g.away} @ ${g.home} — lines, lineups, injuries, best angle.`)} style={{
                 display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
@@ -410,17 +462,31 @@ function BoardTab({ onAsk }) {
                   <div style={{ color: T.text, fontSize: 14, fontWeight: 600 }}>{g.away} <span style={{ color: T.dim }}>@</span> {g.home}</div>
                   <div style={{ fontFamily: M, fontSize: 11, color: T.dim }}>{when}</div>
                 </div>
-                <div style={{ display: "flex", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
-                  {(ml?.outcomes || []).map((o, i) => (
-                    <div key={i} style={{ fontFamily: M, fontSize: 12.5 }}>
-                      <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
-                      <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
-                    </div>
-                  ))}
-                  {tot?.outcomes?.[0]?.point != null && (
-                    <div style={{ fontFamily: M, fontSize: 12.5 }}>
-                      <span style={{ color: T.dim }}>O/U </span>
-                      <span style={{ color: T.amber }}>{tot.outcomes[0].point}</span>
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+                    <span style={{ fontFamily: M, fontSize: 10, color: T.dim, width: 24 }}>FD</span>
+                    {(ml?.outcomes || []).map((o, i) => (
+                      <div key={i} style={{ fontFamily: M, fontSize: 12.5 }}>
+                        <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
+                        <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
+                      </div>
+                    ))}
+                    {tot?.outcomes?.[0]?.point != null && (
+                      <div style={{ fontFamily: M, fontSize: 12.5 }}>
+                        <span style={{ color: T.dim }}>O/U </span>
+                        <span style={{ color: T.amber }}>{tot.outcomes[0].point}</span>
+                      </div>
+                    )}
+                  </div>
+                  {dkOutcomes && (
+                    <div style={{ display: "flex", gap: 14, alignItems: "center", marginTop: 4 }}>
+                      <span style={{ fontFamily: M, fontSize: 10, color: T.dim, width: 24 }}>DK</span>
+                      {dkOutcomes.map((o, i) => (
+                        <div key={i} style={{ fontFamily: M, fontSize: 12.5 }}>
+                          <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
+                          <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -628,11 +694,12 @@ function TodayTab({ onAsk }) {
           <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 30 }}>Nothing in this view right now.</div>
         )}
         {shown.map((r, i) => {
-          const when = r.startMs ? new Date(r.startMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+          const when = fmtWhen(r.game.start);
           const live = r.state === "in";
           const finalG = r.state === "post";
+          const dkOutcomes = bookML(r.game, /draftkings/i);
           return (
-            <button key={i} onClick={() => onAsk(`Full read on ${r.game.away} @ ${r.game.home} (${r.sport}) — lines, lineups, injuries, best angle.`)} style={{
+            <button key={i} onClick={() => onAsk(`Pull full stats and reasoning for ${r.game.away} @ ${r.game.home} (${r.sport}) — lines, lineups, injuries, best angle, and why.`)} style={{
               display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
               borderRadius: 12, padding: "12px 14px", marginBottom: 8, cursor: "pointer", fontFamily: "'Inter', sans-serif",
             }}>
@@ -651,13 +718,27 @@ function TodayTab({ onAsk }) {
                 </div>
               )}
               {r.ml?.outcomes && r.state === "pre" && (
-                <div style={{ display: "flex", gap: 14, marginTop: 6 }}>
-                  {r.ml.outcomes.map((o, j) => (
-                    <div key={j} style={{ fontFamily: M, fontSize: 12 }}>
-                      <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
-                      <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
+                <div style={{ marginTop: 6 }}>
+                  <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+                    <span style={{ fontFamily: M, fontSize: 9.5, color: T.dim, width: 20 }}>FD</span>
+                    {r.ml.outcomes.map((o, j) => (
+                      <div key={j} style={{ fontFamily: M, fontSize: 12 }}>
+                        <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
+                        <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {dkOutcomes && (
+                    <div style={{ display: "flex", gap: 14, alignItems: "center", marginTop: 3 }}>
+                      <span style={{ fontFamily: M, fontSize: 9.5, color: T.dim, width: 20 }}>DK</span>
+                      {dkOutcomes.map((o, j) => (
+                        <div key={j} style={{ fontFamily: M, fontSize: 12 }}>
+                          <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
+                          <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
               )}
             </button>
@@ -672,7 +753,8 @@ function TodayTab({ onAsk }) {
 function TrendingTab() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
-  const [filter, setFilter] = useState("All");
+  const [sportFilter, setSportFilter] = useState("All");
+  const [volTier, setVolTier] = useState("High");
 
   useEffect(() => {
     let dead = false;
@@ -683,19 +765,38 @@ function TrendingTab() {
   }, []);
 
   const SPORT_WORDS = /world cup|mlb|nba|nfl|nhl|match|game|win|beat|score|vs\.?|champion|finals|cup|series|goal/i;
-  const markets = (data?.markets || []).filter((m) => filter === "All" || SPORT_WORDS.test(m.question || ""));
+  const VOL_FLOOR = { "Whale": 100000, "High": 25000, "All": 0 };
+  const floor = VOL_FLOOR[volTier] ?? 0;
+
+  const markets = (data?.markets || [])
+    .filter((m) => m.volume24h >= floor)
+    .filter((m) => sportFilter === "All" || SPORT_WORDS.test(m.question || ""));
+
   const fmt = (n) => n >= 1e6 ? "$" + (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? "$" + Math.round(n / 1e3) + "K" : "$" + n;
+  const errs = data?.sourceErrors || {};
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>What the market's on</H1>
       <div style={{ color: T.dim, fontSize: 12.5, margin: "6px 0 12px" }}>
-        Live Polymarket volume — where real money is going, ranked by 24h action.
+        Polymarket + Kalshi merged — where real money is piling up, ranked by 24h volume.
       </div>
-      <Seg options={["All", "Sports"]} value={filter} onChange={setFilter} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <Seg options={["Whale", "High", "All"]} value={volTier} onChange={setVolTier} />
+        <Seg options={["All", "Sports"]} value={sportFilter} onChange={setSportFilter} />
+      </div>
+      {(errs.polymarket || errs.kalshi) && (
+        <div style={{ fontSize: 11, color: T.dim, marginTop: 8 }}>
+          {errs.polymarket && "Polymarket unavailable right now. "}
+          {errs.kalshi && "Kalshi unavailable right now."}
+        </div>
+      )}
       <div style={{ marginTop: 14 }}>
         {!data && !err && <Spinner label="Pulling live market volume…" />}
         {err && <div style={{ color: T.red, fontSize: 13 }}>{err}</div>}
+        {data && markets.length === 0 && (
+          <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 20 }}>Nothing at this volume tier right now — try "All".</div>
+        )}
         {markets.map((m) => (
           <a key={m.id} href={m.url} target="_blank" rel="noreferrer" style={{
             display: "block", background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12,
@@ -703,7 +804,10 @@ function TrendingTab() {
           }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
               <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{m.question}</div>
-              <div style={{ fontFamily: M, color: T.amber, fontSize: 12, whiteSpace: "nowrap" }}>{fmt(m.volume24h)}<span style={{ color: T.dim }}> /24h</span></div>
+              <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                <div style={{ fontFamily: M, color: T.amber, fontSize: 12 }}>{fmt(m.volume24h)}</div>
+                <div style={{ fontFamily: M, color: T.dim, fontSize: 9.5, marginTop: 1, letterSpacing: 0.5 }}>{(m.source || "").toUpperCase()}</div>
+              </div>
             </div>
             {Array.isArray(m.outcomes) && m.outcomes.length > 0 && (
               <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
@@ -821,16 +925,25 @@ export default function App() {
 function AppInner() {
   const [tab, setTab] = useState("chat");
   const [slips, setSlips] = useState(loadSlips);
-  const [pendingAsk, setPendingAsk] = useState("");
+  const [askSignal, setAskSignal] = useState({ text: "", ts: 0 });
 
   function addSlip(slip) {
     setSlips((prev) => { const next = [slip, ...prev]; saveSlips(next); return next; });
   }
 
-  // Board → Desk handoff
-  function askFromBoard(q) { setPendingAsk(q); setTab("chat"); }
+  // Board/Today → Desk handoff. Uses a timestamp so the same question can be
+  // asked twice in a row, and works without remounting the Desk (which would
+  // wipe its conversation — the whole point of keeping tabs alive).
+  function askFromBoard(q) { setAskSignal({ text: q, ts: Date.now() }); setTab("chat"); }
 
   const TABS = [["chat", "Desk"], ["today", "Today"], ["board", "Board"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "Slips"]];
+
+  // Every tab stays mounted at all times — only visibility toggles. This is what
+  // lets Desk research keep running in the background and preserves scroll/state
+  // when you switch away and come back, instead of losing everything on tab change.
+  const keep = (key, node) => (
+    <div style={{ display: tab === key ? "block" : "none", height: "100%" }}>{node}</div>
+  );
 
   return (
     <div style={{ minHeight: "100dvh", display: "flex", justifyContent: "center", background: "#080A0E", fontFamily: "'Inter', sans-serif" }}>
@@ -854,12 +967,12 @@ function AppInner() {
 
         <div style={{ flex: 1, minHeight: 0 }}>
           <Boundary>
-            {tab === "chat" && <ChatTabCore key={pendingAsk || "chat"} initialQuestion={pendingAsk} onConsumed={() => setPendingAsk("")} />}
-            {tab === "today" && <TodayTab onAsk={askFromBoard} />}
-            {tab === "board" && <BoardTab onAsk={askFromBoard} />}
-            {tab === "parlay" && <ParlayTab onSaveSlip={addSlip} />}
-            {tab === "trend" && <TrendingTab />}
-            {tab === "slips" && <SlipsTab slips={slips} setSlips={setSlips} />}
+            {keep("chat", <ChatTabCore askSignal={askSignal} />)}
+            {keep("today", <TodayTab onAsk={askFromBoard} />)}
+            {keep("board", <BoardTab onAsk={askFromBoard} />)}
+            {keep("parlay", <ParlayTab onSaveSlip={addSlip} />)}
+            {keep("trend", <TrendingTab />)}
+            {keep("slips", <SlipsTab slips={slips} setSlips={setSlips} />)}
           </Boundary>
         </div>
 
@@ -878,7 +991,7 @@ function AppInner() {
   );
 }
 
-function ChatTabCore({ initialQuestion, onConsumed }) {
+function ChatTabCore({ askSignal }) {
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -887,7 +1000,7 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
   const [imgErr, setImgErr] = useState("");
   const endRef = useRef(null);
   const fileRef = useRef(null);
-  const started = useRef(false);
+  const started = useRef(0);
 
   useEffect(() => { try { endRef.current?.scrollIntoView({ behavior: "smooth" }); } catch {} }, [msgs, busy]);
 
@@ -961,15 +1074,16 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
     } finally { setBusy(false); }
   }
 
-  // Fire a handed-off question exactly once, safely
+  // Fire a handed-off question from Board/Today. Uses the signal's timestamp
+  // so it fires exactly once per tap, even for a repeated question, and works
+  // correctly now that Desk never unmounts between tab switches.
   useEffect(() => {
-    if (initialQuestion && !started.current) {
-      started.current = true;
-      send(initialQuestion);
-      if (typeof onConsumed === "function") onConsumed();
+    if (askSignal && askSignal.ts && askSignal.ts !== started.current) {
+      started.current = askSignal.ts;
+      send(askSignal.text);
     }
     // eslint-disable-next-line
-  }, [initialQuestion]);
+  }, [askSignal]);
 
   const starters = [
     "Confirmed MLB lineups tonight?",
