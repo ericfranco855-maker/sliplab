@@ -34,22 +34,46 @@ class Boundary extends React.Component {
 
 /* ================= API ================= */
 async function apiChat(messages, { system, useSearch = true, max_tokens = 1500 } = {}) {
-  const r = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, system, useSearch, max_tokens }),
-  });
-  const d = await r.json().catch(() => ({ error: "Bad response from server" }));
+  let r;
+  try {
+    r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages, system, useSearch, max_tokens }),
+    });
+  } catch (e) {
+    throw new Error("Network error reaching the server — check your connection and try again.");
+  }
+  if (r.status === 413) throw new Error("That upload is too large — try a smaller screenshot or crop it.");
+  if (r.status === 504 || r.status === 502) throw new Error("The request took too long and timed out — try again, or turn off Deep Research for a faster answer.");
+  let d;
+  try {
+    d = await r.json();
+  } catch {
+    throw new Error(`Server error (${r.status}) — try again in a moment.`);
+  }
   if (d.error) throw new Error(d.error);
   return d.text || "";
 }
 
-const CHAT_SYSTEM = `You are SlipLab, a sharp sports research agent for an experienced bettor. Always web search for current lines, confirmed lineups, injuries, and matchups before answering. Be direct and concise: the read, the number, a clear lean or swap. No hedging walls. Use betting shorthand freely (SGP, ML, juice, SOT, TNB). If something can't be confirmed, say exactly what's unconfirmed.`;
+/* Shared analyst methodology injected into every engine */
+const ANALYST_CORE = `
+ANALYST METHODOLOGY — work through this checklist with real searched data, never assumptions:
+1. CONFIRMATION: today's date, confirmed starting lineups/pitchers/keepers, scratches, injury designations. Unconfirmed = say so and discount.
+2. MATCHUP MATH: starter handedness vs lineup splits (wOBA/OPS vs L/R), bullpen fatigue (innings last 3 days), pace/possession styles, defensive matchup on the specific player.
+3. ENVIRONMENT: for MLB — park factors, weather (wind speed AND direction relative to the park, temp, humidity), roof status, umpire strike-zone tendencies. For outdoor sports — wind/rain impact on totals and passing/kicking.
+4. SITUATION: rest days, travel (b2b, cross-country), schedule spot (letdown/lookahead), home/away splits, motivation (elimination, tanking).
+5. MARKET: current line and juice, opening line, direction of movement — if the market moved against your lean, respect it and explain.
+6. PRICE DISCIPLINE: convert the odds to implied probability. Only call something a play when your honest estimate beats the implied probability by 3+ points. If nothing clears that bar, SAY PASS — a smaller card of real edges beats a full card of forced picks. Passing is a recommendation.
+7. CALIBRATION: your estimated percentages must be numbers you'd bet on being right — never inflate to look confident. State the single biggest risk to each pick.`;
 
-const DEEP_SYSTEM = `You are SlipLab in Deep Research mode. Run multiple web searches: confirmed lineups/injuries first, then lines and line movement, then matchup splits and recent form. Structure the answer: THE READ (2-3 sentences), THE NUMBERS (key stats/lines found), THE PLAY (clear recommendation with alternatives). Be thorough but never pad. Flag anything unconfirmed.`;
+const CHAT_SYSTEM = `You are SlipLab, a professional sports betting analyst for an experienced bettor. Always web search before answering: lines, confirmed lineups, injuries, weather, matchups. Be direct: the read, the number, a clear lean or pass. Use betting shorthand (SGP, ML, juice, SOT, TNB, CLV). If something can't be confirmed, say exactly what's unconfirmed.${ANALYST_CORE}`;
 
-const PARLAY_SYSTEM = `You are a parlay construction engine. You will be given live sportsbook lines. Build from those exact numbers; use web search only to confirm lineups and injuries. Respond ONLY with raw JSON, no fences, matching:
-{"title":"short slip title","legs":[{"pick":"team/player + market + line","game":"matchup","odds":"-115","why":"one-sentence data-backed reason"}],"combined_odds":"+450","risk_note":"one sentence on correlation/risk","confidence":"A-"}`;
+const DEEP_SYSTEM = `You are SlipLab in Deep Research mode — a professional sports analyst building a full pregame report. Run multiple searches covering every item in the methodology. Structure the answer: THE READ (2-3 sentences), THE NUMBERS (key stats, lines, weather, splits found), THE RISKS (what kills this bet), THE PLAY (clear recommendation with the edge math: your est % vs implied %, or PASS if no edge). Thorough but never padded.${ANALYST_CORE}`;
+
+const PARLAY_SYSTEM = `You are a professional parlay construction engine. You will be given live sportsbook lines. Work the full methodology on every candidate leg before including it — reject legs that don't clear the edge bar even if it means noting the slip is thinner than requested. Prefer uncorrelated legs unless intentionally stacking correlation, and say so in risk_note. Respond ONLY with raw JSON, no fences, matching:
+{"title":"short slip title","legs":[{"pick":"team/player + market + line","game":"matchup","odds":"-115","why":"one-sentence data-backed reason citing the strongest factor"}],"combined_odds":"+450","risk_note":"one sentence: correlation + the single biggest risk","confidence":"A-"}
+Grade confidence honestly: A range only when every leg clears the edge bar with confirmed data; C range when forced.${ANALYST_CORE}`;
 
 /* ================= SLIP STORAGE ================= */
 const loadSlips = () => {
@@ -62,7 +86,7 @@ const loadSlips = () => {
 const saveSlips = (s) => { try { localStorage.setItem("sliplab_slips", JSON.stringify(s)); } catch {} };
 
 function historyBlock() {
-  const slips = loadSlips().filter((s) => s && s.result);
+  const slips = loadSlips().filter((s) => s && (s.result === "win" || s.result === "loss"));
   if (!slips.length) return "";
   const lines = slips.slice(0, 20).map((s) => {
     const legs = (s.legs || []).map((l) => l && l.pick).filter(Boolean).join(" + ");
@@ -101,14 +125,54 @@ function Seg({ options, value, onChange }) {
 const usd = (p) => (p > 0 ? "+" + p : String(p));
 
 /* ================= TICKET ================= */
+const LIVE_SPORT_KEYS = ["mlb", "nba", "nfl", "nhl", "worldcup"];
+
+function matchLiveGame(gameStr, allGames) {
+  if (!gameStr) return null;
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  const g = norm(gameStr);
+  let best = null;
+  for (const game of allGames) {
+    const away = norm(game.away), home = norm(game.home);
+    if (!away || !home) continue;
+    if ((g.includes(away) || away.includes(g)) || (g.includes(home) || home.includes(g)) ||
+        away.split(" ").some((w) => w.length > 3 && g.includes(w)) ||
+        home.split(" ").some((w) => w.length > 3 && g.includes(w))) {
+      best = game;
+      if (game.state === "in") break; // prefer an in-progress match if found
+    }
+  }
+  return best;
+}
+
 function Ticket({ slip, onResult }) {
   if (!slip) return null;
   const legs = Array.isArray(slip.legs) ? slip.legs : [];
   const status = slip.result;
+  const isLive = status === "live";
+  const [liveGames, setLiveGames] = useState([]);
+
+  useEffect(() => {
+    if (!isLive) return;
+    let dead = false;
+    async function pull() {
+      try {
+        const results = await Promise.all(
+          LIVE_SPORT_KEYS.map((k) => fetch("/api/scores?sport=" + k).then((r) => r.json()).catch(() => ({ games: [] })))
+        );
+        if (dead) return;
+        setLiveGames(results.flatMap((r) => r.games || []));
+      } catch {}
+    }
+    pull();
+    const t = setInterval(pull, 25000);
+    return () => { dead = true; clearInterval(t); };
+  }, [isLive]);
+
   return (
     <div style={{ margin: "10px 0", opacity: status === "loss" ? 0.75 : 1 }}>
       <div style={{ background: T.paper, color: T.paperInk, borderRadius: "10px 10px 0 0", padding: "14px 16px 10px", boxShadow: "0 6px 24px rgba(0,0,0,0.45)", position: "relative", overflow: "hidden" }}>
-        {status && (
+        {status && status !== "live" && (
           <div style={{
             position: "absolute", top: 18, right: -34, transform: "rotate(35deg)", padding: "3px 40px",
             background: status === "win" ? "#1B7A46" : "#A33", color: "#FFF",
@@ -117,19 +181,32 @@ function Ticket({ slip, onResult }) {
         )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
           <div style={{ fontFamily: D, fontWeight: 800, fontSize: 20, letterSpacing: 0.5, textTransform: "uppercase" }}>{slip.title || "Generated Slip"}</div>
-          {slip.confidence && <div style={{ fontFamily: M, fontWeight: 600, fontSize: 12, background: T.paperInk, color: T.paper, padding: "2px 8px", borderRadius: 4 }}>{slip.confidence}</div>}
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            {isLive && <span style={{ fontFamily: D, fontWeight: 800, fontSize: 11, letterSpacing: 1, color: "#1B7A46" }}>● LIVE</span>}
+            {slip.confidence && <div style={{ fontFamily: M, fontWeight: 600, fontSize: 12, background: T.paperInk, color: T.paper, padding: "2px 8px", borderRadius: 4 }}>{slip.confidence}</div>}
+          </div>
         </div>
         <div style={{ borderTop: `1.5px dashed ${T.paperInk}33`, margin: "10px 0" }} />
-        {legs.map((leg, i) => (
-          <div key={i} style={{ padding: "8px 0", borderBottom: i < legs.length - 1 ? `1px solid ${T.paperInk}18` : "none" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{leg?.pick}</div>
-              <div style={{ fontFamily: M, fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", color: String(leg?.odds || "").startsWith("-") ? "#A33" : "#1B7A46" }}>{leg?.odds}</div>
+        {legs.map((leg, i) => {
+          const match = isLive ? matchLiveGame(leg?.game, liveGames) : null;
+          return (
+            <div key={i} style={{ padding: "8px 0", borderBottom: i < legs.length - 1 ? `1px solid ${T.paperInk}18` : "none" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{leg?.pick}</div>
+                <div style={{ fontFamily: M, fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", color: String(leg?.odds || "").startsWith("-") ? "#A33" : "#1B7A46" }}>{leg?.odds}</div>
+              </div>
+              <div style={{ fontSize: 11.5, color: "#5A5340", marginTop: 2 }}>{leg?.game}</div>
+              {leg?.why && <div style={{ fontSize: 12, color: "#3A3527", marginTop: 3, lineHeight: 1.4 }}>{leg.why}</div>}
+              {match && (
+                <div style={{ fontFamily: M, fontSize: 12, marginTop: 4, color: match.state === "in" ? "#1B7A46" : match.state === "post" ? "#6B6350" : "#8A8060" }}>
+                  {match.state === "in" ? "● " : match.state === "post" ? "FINAL — " : ""}
+                  {match.away} {match.awayScore ?? ""} — {match.homeScore ?? ""} {match.home}
+                  {match.state === "in" && match.statusDetail ? ` (${match.statusDetail})` : ""}
+                </div>
+              )}
             </div>
-            <div style={{ fontSize: 11.5, color: "#5A5340", marginTop: 2 }}>{leg?.game}</div>
-            {leg?.why && <div style={{ fontSize: 12, color: "#3A3527", marginTop: 3, lineHeight: 1.4 }}>{leg.why}</div>}
-          </div>
-        ))}
+          );
+        })}
         <div style={{ borderTop: `1.5px dashed ${T.paperInk}33`, margin: "10px 0 8px" }} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: "#6B6350" }}>Combined</span>
@@ -138,6 +215,11 @@ function Ticket({ slip, onResult }) {
         {slip.risk_note && <div style={{ fontSize: 11.5, color: "#6B6350", marginTop: 6, fontStyle: "italic" }}>{slip.risk_note}</div>}
         {onResult && !status && (
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={() => onResult("live")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: `1.5px solid ${T.paperInk}55`, background: "transparent", color: T.paperInk, fontFamily: D, fontWeight: 700, fontSize: 13, letterSpacing: 0.5, cursor: "pointer" }}>I'M PLACING THIS</button>
+          </div>
+        )}
+        {onResult && (status === "live" || !status) && (
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button onClick={() => onResult("win")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "1.5px solid #1B7A46", background: "transparent", color: "#1B7A46", fontFamily: D, fontWeight: 700, fontSize: 14, letterSpacing: 1, cursor: "pointer" }}>MARK WIN</button>
             <button onClick={() => onResult("loss")} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "1.5px solid #A33", background: "transparent", color: "#A33", fontFamily: D, fontWeight: 700, fontSize: 14, letterSpacing: 1, cursor: "pointer" }}>MARK LOSS</button>
           </div>
@@ -151,7 +233,7 @@ function Ticket({ slip, onResult }) {
 }
 
 /* ================= BOARD (live lines + edge leaderboard) ================= */
-const PROPS_SYSTEM = `You are a player-prop ranking engine. FIRST web search today's date and which games are actually being played today in the requested sport, then confirmed lineups/injuries, then the current prop lines. Only include players in games happening today. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"one short data reason"}]} — return 12 to 18 props ranked by est_prob descending, spread across multiple games, not all from one player. est_prob is your honest estimated hit percentage (integer 1-99), never inflated. If no games today, return {"slate_note":"No games today","props":[]}.`;
+const PROPS_SYSTEM = `You are a professional player-prop analyst ranking today's slate. FIRST web search today's date and which games are actually being played today in the requested sport. Then for each candidate prop, work the full methodology: confirmed lineups/starters, matchup splits (batter/pitcher handedness, defensive matchup), park factors and weather (wind speed/direction, temp — critical for MLB totals/power props), bullpen or rotation fatigue, rest/travel, and current line movement. Convert each prop's odds to implied probability and only include it if your honest estimate beats the implied number — if a popular player's line doesn't clear that bar, leave them off in favor of a real edge elsewhere, even a less famous name. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today, wind blowing out at Wrigley","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"the single strongest factor — matchup, weather, form, or park"}]} — return 10 to 14 props ranked by est_prob descending, spread across multiple games. est_prob is a calibrated number you'd stake your own money on being right, never inflated for excitement. If no games today, return {"slate_note":"No games today","props":[]}.${ANALYST_CORE}`;
 
 function devig(outcomes) {
   // Convert American odds to implied probs, remove the vig by normalizing
@@ -351,43 +433,87 @@ function BoardTab({ onAsk }) {
   );
 }
 
+/* Multi-select toggle row — lets you pick more than one sport at once */
+function MultiSeg({ options, values, onChange }) {
+  function toggle(o) {
+    if (values.includes(o)) {
+      if (values.length === 1) return; // keep at least one selected
+      onChange(values.filter((v) => v !== o));
+    } else {
+      onChange([...values, o]);
+    }
+  }
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {options.map((o) => {
+        const on = values.includes(o);
+        return (
+          <button key={o} onClick={() => toggle(o)} style={{
+            padding: "8px 14px", borderRadius: 99, border: `1.5px solid ${on ? T.amber : T.line}`,
+            background: on ? T.amber : "transparent", color: on ? "#1A1300" : T.dim,
+            fontFamily: D, fontWeight: 700, fontSize: 13.5, letterSpacing: 0.5, textTransform: "uppercase", cursor: "pointer",
+          }}>{o}</button>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ================= BUILDER ================= */
 function ParlayTab({ onSaveSlip }) {
-  const [sport, setSport] = useState("MLB");
+  const [sports, setSports] = useState(["MLB"]);
   const [legs, setLegs] = useState(3);
   const [style, setStyle] = useState("Balanced");
+  const [includeProps, setIncludeProps] = useState(true);
   const [slips, setSlips] = useState([]);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState("");
   const [err, setErr] = useState("");
+
+  const SPORT_KEY = { "MLB": "mlb", "World Cup": "worldcup", "NBA": "nba", "NFL": "nfl", "NHL": "nhl" };
 
   async function build() {
     if (busy) return;
     setBusy(true); setErr("");
     try {
       setPhase("Pulling live FanDuel lines…");
-      const sportKey = sport === "World Cup" ? "worldcup" : "mlb";
-      let linesBlock = "No live lines available — confirm current odds via search.";
-      try {
-        const r = await fetch("/api/odds?sport=" + sportKey);
-        const d = await r.json();
-        if (Array.isArray(d.games) && d.games.length) {
-          linesBlock = d.games.slice(0, 12).map((g) => {
-            const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
-            const ml = fd?.markets?.find((m) => m.type === "h2h");
-            const mlStr = ml ? ml.outcomes.map((o) => `${o.name} ${usd(o.price)}`).join(" / ") : "";
-            return `${g.away} @ ${g.home} — ML: ${mlStr}`;
-          }).join("\n");
-        }
-      } catch {}
+      // Pull lines for every selected sport and label each section clearly
+      const sections = [];
+      for (const sportName of sports) {
+        const sportKey = SPORT_KEY[sportName] || "mlb";
+        try {
+          const r = await fetch("/api/odds?sport=" + sportKey);
+          const d = await r.json();
+          if (Array.isArray(d.games) && d.games.length) {
+            const lines = d.games.slice(0, 10).map((g) => {
+              const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
+              const ml = fd?.markets?.find((m) => m.type === "h2h");
+              const mlStr = ml ? ml.outcomes.map((o) => `${o.name} ${usd(o.price)}`).join(" / ") : "";
+              return `${g.away} @ ${g.home} — ML: ${mlStr}`;
+            }).join("\n");
+            sections.push(`[${sportName}]\n${lines}`);
+          } else {
+            sections.push(`[${sportName}]\nNo live lines pulled — confirm current odds via search.`);
+          }
+        } catch { sections.push(`[${sportName}]\nNo live lines pulled — confirm current odds via search.`); }
+      }
+      const linesBlock = sections.join("\n\n");
+      const sportLabel = sports.length > 1 ? sports.join(" + ") : sports[0];
 
-      setPhase("Confirming lineups & building…");
-      const prompt = `LIVE LINES:\n${linesBlock}\n\nBuild a ${legs}-leg ${style.toLowerCase()} parlay for today's ${sport} slate using these lines. ${
+      setPhase(includeProps ? "Confirming lineups, props & building…" : "Confirming lineups & building…");
+      const riskLine =
+        style === "Extreme Safe" ? "Target +100 to +180 combined. Only include legs where your edge estimate beats the implied probability by a wide, obvious margin — heaviest confirmed favorites and safest floor props only. If you can't find enough legs this safe, return fewer legs rather than force it." :
         style === "Safe" ? "Target +150 to +250 combined, high-floor legs." :
         style === "Balanced" ? "Target +300 to +500 combined." :
-        "Target +600 or longer with at least one upside prop."
-      } Return ONLY the JSON.`;
-      const raw = await apiChat([{ role: "user", content: prompt }], { system: PARLAY_SYSTEM + historyBlock(), useSearch: true, max_tokens: 2000 });
+        "Target +600 or longer with at least one upside prop.";
+      const propsLine = includeProps
+        ? "Mix moneylines WITH player props (hits, Ks, HRs, SOT, points, etc.) — search for real current prop lines rather than only using the moneylines below. Player props are encouraged, not just game-level ML."
+        : "Use moneylines/spreads/totals only — no player props.";
+      const mixLine = sports.length > 1
+        ? `This slip should MIX legs across these sports: ${sportLabel} — the slate sections above are labeled by sport. Draw legs from more than one of them rather than sticking to just one, and note in risk_note that legs come from unrelated sports/slates (which is actually good for reducing correlation).`
+        : "";
+      const prompt = `LIVE LINES BY SPORT:\n${linesBlock}\n\nBuild a ${legs}-leg ${style.toLowerCase()} parlay for today's ${sportLabel} slate(s). ${propsLine} ${riskLine} ${mixLine} Return ONLY the JSON.`;
+      const raw = await apiChat([{ role: "user", content: prompt }], { system: PARLAY_SYSTEM + historyBlock(), useSearch: true, max_tokens: 2500 });
       const clean = String(raw).replace(/```json|```/g, "").trim();
       const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
       if (a < 0 || b < 0) throw new Error("Model didn't return a slip — try again");
@@ -404,9 +530,16 @@ function ParlayTab({ onSaveSlip }) {
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>Build a slip</H1>
       <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14 }}>
-        <div><div style={lbl}>Slate</div><Seg options={["MLB", "World Cup"]} value={sport} onChange={setSport} /></div>
+        <div>
+          <div style={lbl}>Slate — tap to mix multiple</div>
+          <MultiSeg options={["MLB", "World Cup", "NBA", "NFL", "NHL"]} values={sports} onChange={setSports} />
+        </div>
         <div><div style={lbl}>Legs</div><Seg options={[2, 3, 4, 5]} value={legs} onChange={setLegs} /></div>
-        <div><div style={lbl}>Risk</div><Seg options={["Safe", "Balanced", "Longshot"]} value={style} onChange={setStyle} /></div>
+        <div><div style={lbl}>Risk</div><Seg options={["Extreme Safe", "Safe", "Balanced", "Longshot"]} value={style} onChange={setStyle} /></div>
+        <div>
+          <div style={lbl}>Leg types</div>
+          <Seg options={["ML + Props", "ML Only"]} value={includeProps ? "ML + Props" : "ML Only"} onChange={(v) => setIncludeProps(v === "ML + Props")} />
+        </div>
         <button onClick={build} disabled={busy} style={{
           background: T.amber, border: "none", borderRadius: 12, padding: "14px 0",
           fontFamily: D, fontWeight: 800, fontSize: 19, letterSpacing: 1, color: "#1A1300",
@@ -422,6 +555,114 @@ function ParlayTab({ onSaveSlip }) {
             Built from live FanDuel lines, saved automatically to My Slips.
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ================= TRENDING ================= */
+/* ================= TODAY (everything still bettable, across every sport) ================= */
+const ALL_SPORTS = [
+  { key: "mlb", label: "MLB" },
+  { key: "nba", label: "NBA" },
+  { key: "nfl", label: "NFL" },
+  { key: "nhl", label: "NHL" },
+  { key: "worldcup", label: "World Cup" },
+];
+
+function TodayTab({ onAsk }) {
+  const [data, setData] = useState({}); // { sportKey: { odds, scores, err, loading } }
+  const [filter, setFilter] = useState("Upcoming");
+
+  useEffect(() => {
+    let dead = false;
+    ALL_SPORTS.forEach(({ key }) => {
+      setData((d) => ({ ...d, [key]: { ...(d[key] || {}), loading: true } }));
+      Promise.all([
+        fetch("/api/odds?sport=" + key).then((r) => r.json()).catch(() => ({ games: [] })),
+        fetch("/api/scores?sport=" + key).then((r) => r.json()).catch(() => ({ games: [] })),
+      ]).then(([odds, scores]) => {
+        if (dead) return;
+        setData((d) => ({ ...d, [key]: { odds: odds.games || [], scores: scores.games || [], loading: false, err: odds.error } }));
+      });
+    });
+    return () => { dead = true; };
+  }, []);
+
+  const now = Date.now();
+
+  // Merge: for each sport, build a unified list of games with odds + live/final status
+  const rows = [];
+  for (const { key, label } of ALL_SPORTS) {
+    const bucket = data[key];
+    if (!bucket) continue;
+    const odds = bucket.odds || [];
+    for (const g of odds) {
+      const startMs = g.start ? new Date(g.start).getTime() : 0;
+      const scoreMatch = (bucket.scores || []).find((s) => {
+        const a = (s.away || "").toLowerCase(), h = (s.home || "").toLowerCase();
+        return (g.away || "").toLowerCase().includes(a) || a.includes((g.away || "").toLowerCase()) ||
+               (g.home || "").toLowerCase().includes(h) || h.includes((g.home || "").toLowerCase());
+      });
+      const state = scoreMatch?.state || (startMs > now ? "pre" : "pre");
+      const fd = (g.books || []).find((b) => /fanduel/i.test(b.book)) || (g.books || [])[0];
+      const ml = fd?.markets?.find((m) => m.type === "h2h");
+      rows.push({ sport: label, key, game: g, startMs, state, scoreMatch, ml });
+    }
+  }
+  rows.sort((a, b) => a.startMs - b.startMs);
+
+  const upcoming = rows.filter((r) => r.state !== "post" && (r.state === "in" ? filter !== "Upcoming" : true) && r.startMs > 0);
+  const shown = filter === "Upcoming" ? rows.filter((r) => r.state === "pre") : filter === "Live" ? rows.filter((r) => r.state === "in") : rows.filter((r) => r.state === "post");
+
+  const anyLoading = ALL_SPORTS.some(({ key }) => data[key]?.loading);
+
+  return (
+    <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
+      <H1>Today</H1>
+      <div style={{ color: T.dim, fontSize: 12.5, margin: "6px 0 12px" }}>Every sport, one view — what's still on the board today.</div>
+      <Seg options={["Upcoming", "Live", "Final"]} value={filter} onChange={setFilter} />
+      <div style={{ marginTop: 14 }}>
+        {anyLoading && shown.length === 0 && <Spinner label="Pulling today's full schedule…" />}
+        {!anyLoading && shown.length === 0 && (
+          <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 30 }}>Nothing in this view right now.</div>
+        )}
+        {shown.map((r, i) => {
+          const when = r.startMs ? new Date(r.startMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+          const live = r.state === "in";
+          const finalG = r.state === "post";
+          return (
+            <button key={i} onClick={() => onAsk(`Full read on ${r.game.away} @ ${r.game.home} (${r.sport}) — lines, lineups, injuries, best angle.`)} style={{
+              display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
+              borderRadius: 12, padding: "12px 14px", marginBottom: 8, cursor: "pointer", fontFamily: "'Inter', sans-serif",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <div style={{ fontFamily: M, fontSize: 10.5, color: T.amber, letterSpacing: 1 }}>{r.sport.toUpperCase()}</div>
+                <div style={{ fontFamily: M, fontSize: 11, color: live ? T.green : T.dim }}>
+                  {live ? "● LIVE " + (r.scoreMatch?.statusDetail || "") : finalG ? "FINAL" : when}
+                </div>
+              </div>
+              <div style={{ color: T.text, fontSize: 14, fontWeight: 600, marginTop: 3 }}>
+                {r.game.away} <span style={{ color: T.dim }}>@</span> {r.game.home}
+              </div>
+              {(live || finalG) && r.scoreMatch && (
+                <div style={{ fontFamily: M, fontSize: 13, color: T.amber, marginTop: 3 }}>
+                  {r.scoreMatch.awayScore} — {r.scoreMatch.homeScore}
+                </div>
+              )}
+              {r.ml?.outcomes && r.state === "pre" && (
+                <div style={{ display: "flex", gap: 14, marginTop: 6 }}>
+                  {r.ml.outcomes.map((o, j) => (
+                    <div key={j} style={{ fontFamily: M, fontSize: 12 }}>
+                      <span style={{ color: T.dim }}>{o.name?.split(" ").slice(-1)[0]} </span>
+                      <span style={{ color: o.price > 0 ? T.green : T.red }}>{usd(o.price)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -489,7 +730,8 @@ function SlipsTab({ slips, setSlips }) {
   const [importing, setImporting] = useState(false);
   const [impErr, setImpErr] = useState("");
 
-  const graded = slips.filter((s) => s && s.result);
+  const graded = slips.filter((s) => s && (s.result === "win" || s.result === "loss"));
+  const liveCount = slips.filter((s) => s && s.result === "live").length;
   const wins = graded.filter((s) => s.result === "win").length;
   const rate = graded.length ? Math.round((wins / graded.length) * 100) : null;
 
@@ -525,7 +767,7 @@ function SlipsTab({ slips, setSlips }) {
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>My slips</H1>
       <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-        {[["Printed", slips.length], ["Cashed", wins], ["Hit rate", rate == null ? "—" : rate + "%"]].map(([k, v]) => (
+        {[["Printed", slips.length], ["Live", liveCount], ["Cashed", wins], ["Hit rate", rate == null ? "—" : rate + "%"]].map(([k, v]) => (
           <div key={k} style={{ flex: 1, background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12, padding: "10px 0", textAlign: "center" }}>
             <div style={{ fontFamily: M, fontWeight: 600, fontSize: 20, color: k === "Hit rate" && rate != null && rate >= 50 ? T.green : T.text }}>{v}</div>
             <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: 1, color: T.dim, marginTop: 2 }}>{k}</div>
@@ -588,7 +830,7 @@ function AppInner() {
   // Board → Desk handoff
   function askFromBoard(q) { setPendingAsk(q); setTab("chat"); }
 
-  const TABS = [["chat", "Desk"], ["board", "Board"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "Slips"]];
+  const TABS = [["chat", "Desk"], ["today", "Today"], ["board", "Board"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "Slips"]];
 
   return (
     <div style={{ minHeight: "100dvh", display: "flex", justifyContent: "center", background: "#080A0E", fontFamily: "'Inter', sans-serif" }}>
@@ -613,6 +855,7 @@ function AppInner() {
         <div style={{ flex: 1, minHeight: 0 }}>
           <Boundary>
             {tab === "chat" && <ChatTabCore key={pendingAsk || "chat"} initialQuestion={pendingAsk} onConsumed={() => setPendingAsk("")} />}
+            {tab === "today" && <TodayTab onAsk={askFromBoard} />}
             {tab === "board" && <BoardTab onAsk={askFromBoard} />}
             {tab === "parlay" && <ParlayTab onSaveSlip={addSlip} />}
             {tab === "trend" && <TrendingTab />}
@@ -641,6 +884,7 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
   const [busy, setBusy] = useState(false);
   const [deep, setDeep] = useState(false);
   const [image, setImage] = useState(null); // { dataUrl, media_type, base64 }
+  const [imgErr, setImgErr] = useState("");
   const endRef = useRef(null);
   const fileRef = useRef(null);
   const started = useRef(false);
@@ -651,12 +895,29 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
     if (!/^image\//.test(f.type)) return;
+    setImgErr("");
     const reader = new FileReader();
     reader.onload = () => {
-      const dataUrl = String(reader.result);
-      const base64 = dataUrl.split(",")[1];
-      setImage({ dataUrl, media_type: f.type, base64 });
+      const img = new Image();
+      img.onload = () => {
+        // Resize down so the payload never trips the server's size limit —
+        // phone screenshots (often 1170x2532+, 1-4MB) fail uploads otherwise.
+        const MAX_W = 1000;
+        const scale = Math.min(1, MAX_W / img.width);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+        const base64 = dataUrl.split(",")[1];
+        setImage({ dataUrl, media_type: "image/jpeg", base64 });
+      };
+      img.onerror = () => setImgErr("Couldn't read that image — try a different screenshot.");
+      img.src = String(reader.result);
     };
+    reader.onerror = () => setImgErr("Couldn't read that file.");
     reader.readAsDataURL(f);
     e.target.value = "";
   }
@@ -760,6 +1021,7 @@ function ChatTabCore({ initialQuestion, onConsumed }) {
         <div ref={endRef} />
       </div>
       <div style={{ padding: "10px 14px 14px", borderTop: `1px solid ${T.line}` }}>
+        {imgErr && <div style={{ color: T.red, fontSize: 12.5, marginBottom: 8 }}>{imgErr}</div>}
         {image && (
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10, padding: 8 }}>
             <img src={image.dataUrl} alt="attached" style={{ height: 44, width: 44, objectFit: "cover", borderRadius: 6 }} />
