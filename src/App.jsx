@@ -1,10 +1,15 @@
 import React, { useState, useRef, useEffect } from "react";
 
-/* ================= THEME ================= */
+/* ================= THEME =================
+   Design language: a live sportsbook terminal. Amber is reserved for
+   brand + primary actions only. Phosphor teal is the separate "live/data"
+   accent (ticker, live badges) so the palette isn't one-hue-on-black.
+   Green/red are reserved exclusively for win/take vs loss/pass signals. */
 const T = {
-  bg: "#0D1015", surface: "#151A22", surface2: "#1C232E", line: "#262F3C",
+  bg: "#0A0D12", surface: "#12171F", surface2: "#171D27", line: "#232B36",
   paper: "#F5F1E6", paperInk: "#17130A", amber: "#FFB627",
-  green: "#43D98A", red: "#F26D6D", text: "#E8ECF2", dim: "#8B96A5",
+  phosphor: "#2FD1C5",
+  green: "#3DDC84", red: "#F2555B", text: "#E8ECF2", dim: "#8B96A5",
 };
 const D = "'Barlow Condensed', sans-serif";
 const M = "'IBM Plex Mono', monospace";
@@ -75,6 +80,39 @@ const PARLAY_SYSTEM = `You are a professional parlay construction engine. You wi
 {"title":"short slip title","legs":[{"pick":"team/player + market + line","game":"matchup","odds":"-115","why":"one-sentence data-backed reason citing the strongest factor"}],"combined_odds":"+450","risk_note":"one sentence: correlation + the single biggest risk","confidence":"A-"}
 Grade confidence honestly: A range only when every leg clears the edge bar with confirmed data; C range when forced.${ANALYST_CORE}`;
 
+const HYPER_ANALYZE_SYSTEM = `You are hyper-analyzing a bettor's own hand-picked parlay. You'll get their exact selected legs. Web search to confirm current status, lines, lineups, and injuries for every single one before saying anything. Structure your reply in plain text with these exact section headers, nothing else:
+PER-LEG CALLS
+One line per leg: the pick, then KEEP, CUT, or SWAP → [alternative] with a short reason citing the real factor (matchup, weather, injury, line movement).
+COMBINED READ
+Your honest estimate of the true combined hit probability as a percentage, the biggest correlation or risk across the legs, and whether the market's price on this combination is fair.
+THE VERDICT
+One direct paragraph: submit as-is, cut specific legs, or pass entirely — and why. No hedging, pick a side.
+${ANALYST_CORE}`;
+
+/* American-odds helpers for combining a manually-built slip's price */
+function parseFirstOdds(str) {
+  const m = String(str || "").match(/[-+]\d+/);
+  return m ? m[0] : null;
+}
+function oddsToDecimal(american) {
+  const n = Number(american);
+  if (!isFinite(n) || n === 0) return null;
+  return n > 0 ? 1 + n / 100 : 1 + 100 / Math.abs(n);
+}
+function decimalToOdds(dec) {
+  if (dec >= 2) return "+" + Math.round((dec - 1) * 100);
+  return String(Math.round(-100 / (dec - 1)));
+}
+function combinedOdds(items) {
+  let dec = 1, any = false;
+  for (const it of items) {
+    const o = parseFirstOdds(it.odds);
+    const d = o ? oddsToDecimal(o) : null;
+    if (d) { dec *= d; any = true; }
+  }
+  return any ? decimalToOdds(dec) : "—";
+}
+
 /* ================= SLIP STORAGE ================= */
 const loadSlips = () => {
   try {
@@ -84,6 +122,14 @@ const loadSlips = () => {
   } catch { return []; }
 };
 const saveSlips = (s) => { try { localStorage.setItem("sliplab_slips", JSON.stringify(s)); } catch {} };
+
+const loadCart = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem("sliplab_cart") || "[]");
+    return Array.isArray(raw) ? raw : [];
+  } catch { return []; }
+};
+const saveCart = (c) => { try { localStorage.setItem("sliplab_cart", JSON.stringify(c)); } catch {} };
 
 function historyBlock() {
   const slips = loadSlips().filter((s) => s && (s.result === "win" || s.result === "loss"));
@@ -103,19 +149,23 @@ const Spinner = ({ label }) => (
 );
 
 const H1 = ({ children }) => (
-  <div style={{ fontFamily: D, fontWeight: 800, fontSize: 28, textTransform: "uppercase", color: T.text }}>{children}</div>
+  <div>
+    <div style={{ fontFamily: D, fontWeight: 800, fontSize: 28, textTransform: "uppercase", color: T.text, letterSpacing: 0.5 }}>{children}</div>
+    <div style={{ width: 34, height: 3, background: `linear-gradient(90deg, ${T.amber}, ${T.amber}00)`, borderRadius: 2, marginTop: 6 }} />
+  </div>
 );
 
 const lbl = { fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, marginBottom: 6 };
 
 function Seg({ options, value, onChange }) {
   return (
-    <div style={{ display: "flex", background: T.surface, border: `1px solid ${T.line}`, borderRadius: 10, padding: 3, gap: 3 }}>
+    <div style={{ display: "flex", background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10, padding: 3, gap: 3, boxShadow: "inset 0 1px 3px rgba(0,0,0,0.3)" }}>
       {options.map((o) => (
         <button key={String(o)} onClick={() => onChange(o)} style={{
           flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer",
           background: value === o ? T.amber : "transparent", color: value === o ? "#1A1300" : T.dim,
           fontFamily: D, fontWeight: 700, fontSize: 14.5, letterSpacing: 0.5, textTransform: "uppercase",
+          boxShadow: value === o ? "0 2px 8px rgba(255,182,39,0.35)" : "none",
         }}>{String(o)}</button>
       ))}
     </div>
@@ -139,6 +189,34 @@ function bookML(g, nameRegex) {
 }
 
 // Best-effort match of a free-text "Team A @ Team B" string to a game object
+// Shared image compressor: resizes any picked photo down before it's sent
+// anywhere, so phone screenshots (1-4MB) never trip the server's size limit.
+function compressImageFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !/^image\//.test(file.type)) { reject(new Error("Not an image")); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX_W = 1000;
+        const scale = Math.min(1, MAX_W / img.width);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+        resolve({ dataUrl, media_type: "image/jpeg", base64: dataUrl.split(",")[1] });
+      };
+      img.onerror = () => reject(new Error("Couldn't read that image — try a different screenshot."));
+      img.src = String(reader.result);
+    };
+    reader.onerror = () => reject(new Error("Couldn't read that file."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function findGameForText(text, games) {
   if (!text) return null;
   const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
@@ -202,7 +280,7 @@ function Ticket({ slip, onResult }) {
 
   return (
     <div style={{ margin: "10px 0", opacity: status === "loss" ? 0.75 : 1 }}>
-      <div style={{ background: T.paper, color: T.paperInk, borderRadius: "10px 10px 0 0", padding: "14px 16px 10px", boxShadow: "0 6px 24px rgba(0,0,0,0.45)", position: "relative", overflow: "hidden" }}>
+      <div style={{ background: T.paper, color: T.paperInk, borderRadius: "10px 10px 0 0", padding: "14px 16px 10px", boxShadow: "0 10px 32px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.3)", position: "relative", overflow: "hidden" }}>
         {status && status !== "live" && (
           <div style={{
             position: "absolute", top: 18, right: -34, transform: "rotate(35deg)", padding: "3px 40px",
@@ -264,7 +342,7 @@ function Ticket({ slip, onResult }) {
 }
 
 /* ================= BOARD (live lines + edge leaderboard) ================= */
-const PROPS_SYSTEM = `You are a professional player-prop analyst ranking today's slate. FIRST web search today's date and which games are actually being played today in the requested sport. Then for each candidate prop, work the full methodology: confirmed lineups/starters, matchup splits (batter/pitcher handedness, defensive matchup), park factors and weather (wind speed/direction, temp — critical for MLB totals/power props), bullpen or rotation fatigue, rest/travel, and current line movement. If you can find the same prop line at both FanDuel and DraftKings, note both in the odds field like "FD -115 / DK -120" — otherwise just give the one you found. Convert each prop's odds to implied probability and only include it if your honest estimate beats the implied number — if a popular player's line doesn't clear that bar, leave them off in favor of a real edge elsewhere, even a less famous name. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today, wind blowing out at Wrigley","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","est_prob":62,"why":"the single strongest factor — matchup, weather, form, or park"}]} — return 10 to 14 props ranked by est_prob descending, spread across multiple games. est_prob is a calibrated number you'd stake your own money on being right, never inflated for excitement. If no games today, return {"slate_note":"No games today","props":[]}.${ANALYST_CORE}`;
+const PROPS_SYSTEM = `You are a professional player-prop analyst ranking today's slate. FIRST web search today's date and which games are actually being played today in the requested sport. Then for each candidate prop, work the full methodology: confirmed lineups/starters, matchup splits (batter/pitcher handedness, defensive matchup), park factors and weather (wind speed/direction, temp — critical for MLB totals/power props), bullpen or rotation fatigue, rest/travel, and current line movement. If you can find the same prop line at both FanDuel and DraftKings, note both in the odds field like "FD -115 / DK -120" — otherwise just give the one you found. Convert each prop's odds to implied probability (implied_prob) and compare it to your own honest estimate (est_prob) — edge_pts is est_prob minus implied_prob. Set verdict to "take" only when edge_pts is a real, wide margin (roughly 5+ points) backed by a concrete factor, "lean" for a smaller genuine edge (2-5 points), or "pass" when the line is priced about right or your estimate doesn't clear it — include pass entries too if they're close calls worth flagging, don't just omit them. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today, wind blowing out at Wrigley","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","implied_prob":56,"est_prob":62,"edge_pts":6,"verdict":"take","why":"the single strongest factor — matchup, weather, form, or park"}]} — return 10 to 14 props total, mostly real edges but a couple of honest passes are fine, ranked by edge_pts descending, spread across multiple games. Every probability is a calibrated number you'd stake your own money on being right, never inflated for excitement. If no games today, return {"slate_note":"No games today","props":[]}.${ANALYST_CORE}`;
 
 function devig(outcomes) {
   // Convert American odds to implied probs, remove the vig by normalizing
@@ -281,14 +359,147 @@ function ProbBar({ pct }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <div style={{ flex: 1, height: 5, background: T.surface2, borderRadius: 99, overflow: "hidden" }}>
-        <div style={{ width: Math.min(pct, 100) + "%", height: "100%", background: color }} />
+        <div style={{ width: Math.min(pct, 100) + "%", height: "100%", background: color, boxShadow: `0 0 8px ${color}88` }} />
       </div>
       <span style={{ fontFamily: M, fontWeight: 600, fontSize: 13, color, minWidth: 38, textAlign: "right" }}>{pct}%</span>
     </div>
   );
 }
 
-function BoardTab({ onAsk }) {
+// Compute a plain-language verdict from a probability (and optional explicit
+// verdict string from the AI, which takes priority since it has real context
+// a raw threshold can't see — weather, matchup, etc.)
+function verdictFor(pct, explicit) {
+  if (explicit) {
+    const v = String(explicit).toLowerCase();
+    if (v.includes("take")) return "TAKE";
+    if (v.includes("pass")) return "PASS";
+    if (v.includes("lean")) return "LEAN";
+  }
+  if (pct == null) return null;
+  if (pct >= 58) return "TAKE";
+  if (pct >= 51) return "LEAN";
+  return "PASS";
+}
+
+function VerdictChip({ verdict }) {
+  if (!verdict) return null;
+  const style =
+    verdict === "TAKE" ? { bg: T.green + "22", fg: T.green, bd: T.green + "55" } :
+    verdict === "PASS" ? { bg: T.red + "1a", fg: T.red, bd: T.red + "44" } :
+    { bg: T.amber + "1a", fg: T.amber, bd: T.amber + "44" };
+  return (
+    <span style={{
+      fontFamily: D, fontWeight: 800, fontSize: 11.5, letterSpacing: 1,
+      color: style.fg, background: style.bg, border: `1px solid ${style.bd}`,
+      padding: "2px 8px", borderRadius: 6, whiteSpace: "nowrap",
+    }}>{verdict}</span>
+  );
+}
+
+/* ================= LIVE TICKER — signature scrolling strip ================= */
+function LiveTicker() {
+  const [items, setItems] = useState([]);
+
+  useEffect(() => {
+    let dead = false;
+    Promise.all(
+      ["mlb", "nba", "worldcup"].map((k) => fetch("/api/scores?sport=" + k).then((r) => r.json()).catch(() => ({ games: [] })))
+    ).then((results) => {
+      if (dead) return;
+      const games = results.flatMap((r) => r.games || []);
+      const live = games.filter((g) => g.state === "in").slice(0, 6);
+      const upcoming = games.filter((g) => g.state === "pre").slice(0, 6);
+      setItems([...live, ...upcoming]);
+    });
+    const t = setInterval(() => {
+      Promise.all(
+        ["mlb", "nba", "worldcup"].map((k) => fetch("/api/scores?sport=" + k).then((r) => r.json()).catch(() => ({ games: [] })))
+      ).then((results) => {
+        if (dead) return;
+        const games = results.flatMap((r) => r.games || []);
+        const live = games.filter((g) => g.state === "in").slice(0, 6);
+        const upcoming = games.filter((g) => g.state === "pre").slice(0, 6);
+        setItems([...live, ...upcoming]);
+      });
+    }, 45000);
+    return () => { dead = true; clearInterval(t); };
+  }, []);
+
+  if (items.length === 0) return null;
+  const track = [...items, ...items]; // duplicate for seamless loop
+
+  return (
+    <div style={{ overflow: "hidden", borderBottom: `1px solid ${T.line}`, background: "#080B0F", padding: "6px 0" }}>
+      <div className="ticker-track" style={{ display: "flex", gap: 28, whiteSpace: "nowrap", width: "max-content" }}>
+        {track.map((g, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: M, fontSize: 11.5 }}>
+            {g.state === "in" ? (
+              <>
+                <span style={{ color: T.phosphor }}>●</span>
+                <span style={{ color: T.text }}>{g.away} {g.awayScore}</span>
+                <span style={{ color: T.dim }}>—</span>
+                <span style={{ color: T.text }}>{g.homeScore} {g.home}</span>
+                <span style={{ color: T.phosphor, fontSize: 10 }}>{g.statusDetail}</span>
+              </>
+            ) : (
+              <>
+                <span style={{ color: T.dim }}>{g.away} @ {g.home}</span>
+                <span style={{ color: T.dim, fontSize: 10 }}>{fmtWhen(g.start)}</span>
+              </>
+            )}
+            <span style={{ color: T.line }}>·</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* Shared row for anything that can be added to a manual slip: cart toggle,
+   verdict chip, probability bar, and a tap-through to the Desk for deep research. */
+function PickRow({ id, index, title, subtitle, timeLabel, pct, explicitVerdict, primaryOdds, secondaryOdds, inCart, onToggleCart, onAsk }) {
+  const verdict = verdictFor(pct, explicitVerdict);
+  return (
+    <div style={{
+      display: "flex", alignItems: "stretch", gap: 0, marginBottom: 8,
+      background: T.surface, border: `1px solid ${T.line}`, borderRadius: 14, overflow: "hidden",
+    }}>
+      <button onClick={onToggleCart} aria-label={inCart ? "Remove from slip" : "Add to slip"} style={{
+        width: 42, flexShrink: 0, border: "none", cursor: "pointer",
+        background: inCart ? T.phosphor : T.surface2, color: inCart ? "#04201E" : T.dim,
+        fontSize: 19, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center",
+      }}>{inCart ? "✓" : "+"}</button>
+      <button onClick={onAsk} style={{
+        flex: 1, textAlign: "left", background: "transparent", border: "none", cursor: "pointer",
+        padding: "11px 13px 11px 12px", fontFamily: "'Inter', sans-serif", minWidth: 0,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+          <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600, minWidth: 0 }}>
+            {index != null && <span style={{ fontFamily: M, color: T.dim, fontSize: 11, marginRight: 7 }}>{String(index + 1).padStart(2, "0")}</span>}
+            {title}
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            {primaryOdds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(primaryOdds).startsWith("-") ? T.red : T.green }}>{primaryOdds}</div>}
+            {secondaryOdds && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, marginTop: 1 }}>{secondaryOdds}</div>}
+          </div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, margin: "3px 0 8px" }}>
+          <div style={{ fontSize: 11, color: T.dim, flex: 1, minWidth: 0 }}>{subtitle}</div>
+          {timeLabel && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, whiteSpace: "nowrap", flexShrink: 0 }}>{timeLabel}</div>}
+        </div>
+        {pct != null && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ flex: 1 }}><ProbBar pct={pct} /></div>
+            <VerdictChip verdict={verdict} />
+          </div>
+        )}
+      </button>
+    </div>
+  );
+}
+
+function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
   const [mode, setMode] = useState("Edge");
   const [sport, setSport] = useState("mlb");
   const [data, setData] = useState(null);
@@ -354,7 +565,7 @@ function BoardTab({ onAsk }) {
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>The board</H1>
-      <div style={{ color: T.dim, fontSize: 11.5, margin: "4px 0 2px" }}>FanDuel & DraftKings compared where available · every pick shows game time</div>
+      <div style={{ color: T.dim, fontSize: 11.5, margin: "4px 0 2px" }}>FanDuel & DraftKings compared where available · take/lean/pass on every pick</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "10px 0 12px" }}>
         <Seg options={["Edge", "Props", "Lines"]} value={mode} onChange={setMode} />
         <Seg options={["mlb", "worldcup", "nba", "nfl", "nhl"]} value={sport} onChange={setSport} />
@@ -366,7 +577,7 @@ function BoardTab({ onAsk }) {
       {mode === "Props" && (
         <div>
           <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, margin: "4px 0 8px" }}>
-            Every player prop ranked by hit % · today's slate only
+            Every player prop scored, with a take/lean/pass call · tap + to build a slip
           </div>
           <button onClick={scoreProps} disabled={propBusy} style={{
             width: "100%", background: T.amber, border: "none", borderRadius: 12, padding: "13px 0",
@@ -375,30 +586,28 @@ function BoardTab({ onAsk }) {
           }}>{propBusy ? "Ranking the slate…" : props_ ? "Refresh rankings" : `Rank today's ${sport.toUpperCase()} props`}</button>
           {propBusy && <Spinner label="Checking today's games, lineups, and lines…" />}
           {propErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{propErr}</div>}
-          {slateNote && <div style={{ fontFamily: M, fontSize: 12, color: T.green, margin: "10px 0 4px" }}>● {slateNote}</div>}
-          {(props_ || []).map((p, i) => {
-            const gameMatch = findGameForText(p.game, games);
-            const when = fmtWhen(gameMatch?.start);
-            return (
-              <button key={i} onClick={() => onAsk(`Pull full stats and matchup context for ${p.player} — ${p.prop} (${p.game}). Show recent performance trends, the specific matchup/split that supports it, and explain exactly why it should hit. Worth a leg today?`)} style={{
-                display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
-                borderRadius: 12, padding: "11px 14px", marginTop: 8, cursor: "pointer", fontFamily: "'Inter', sans-serif",
-              }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                  <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
-                    <span style={{ fontFamily: M, color: T.amber, fontSize: 12, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
-                    {p.player} · {p.prop}
-                  </div>
-                  {p.odds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(p.odds).startsWith("-") ? T.red : T.green }}>{p.odds}</div>}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, margin: "3px 0 6px" }}>
-                  <div style={{ fontSize: 11, color: T.dim }}>{p.game}{p.why ? " — " + p.why : ""}</div>
-                  {when && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, whiteSpace: "nowrap" }}>{when}</div>}
-                </div>
-                <ProbBar pct={Math.round(p.est_prob || 0)} />
-              </button>
-            );
-          })}
+          {slateNote && <div style={{ fontFamily: M, fontSize: 12, color: T.phosphor, margin: "10px 0 4px" }}>● {slateNote}</div>}
+          <div style={{ marginTop: 10 }}>
+            {(props_ || []).map((p, i) => {
+              const gameMatch = findGameForText(p.game, games);
+              const when = fmtWhen(gameMatch?.start);
+              const id = `prop-${p.player}-${p.prop}-${p.game}`;
+              return (
+                <PickRow
+                  key={id} id={id} index={i}
+                  title={`${p.player} · ${p.prop}`}
+                  subtitle={p.game + (p.why ? " — " + p.why : "")}
+                  timeLabel={when}
+                  pct={Math.round(p.est_prob ?? 0)}
+                  explicitVerdict={p.verdict}
+                  primaryOdds={p.odds}
+                  inCart={isInCart(id)}
+                  onToggleCart={() => addToCart({ id, pick: `${p.player} ${p.prop}`, game: p.game, odds: p.odds, source: "props", pct: Math.round(p.est_prob ?? 0), why: p.why })}
+                  onAsk={() => onAsk(`Pull full stats and matchup context for ${p.player} — ${p.prop} (${p.game}). Show recent performance trends, the specific matchup/split that supports it, and explain exactly why it should hit. Worth a leg today?`)}
+                />
+              );
+            })}
+          </div>
           {props_ && props_.length > 0 && (
             <div style={{ fontSize: 11, color: T.dim, marginTop: 10, lineHeight: 1.5 }}>
               AI estimates from live research, not sportsbook-implied — always confirm the number on FanDuel before locking.
@@ -416,30 +625,25 @@ function BoardTab({ onAsk }) {
             Win probability leaderboard · vig removed from live FanDuel lines
           </div>
           {edge.length === 0 && <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 20 }}>No games on this board right now.</div>}
-          {edge.map((e, i) => (
-            <button key={i} onClick={() => onAsk(`Pull full stats and reasoning for ${e.pick} (${e.game}) — recent form, matchup, injuries, weather if relevant. Is it worth anchoring a slip?`)} style={{
-              display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
-              borderRadius: 12, padding: "11px 14px", marginBottom: 7, cursor: "pointer", fontFamily: "'Inter', sans-serif",
-            }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
-                  <span style={{ fontFamily: M, color: T.dim, fontSize: 11, marginRight: 8 }}>{String(i + 1).padStart(2, "0")}</span>
-                  {e.pick}
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontFamily: M, fontSize: 12.5, color: String(e.odds).startsWith("-") ? T.red : T.green }}>FD {e.odds}</div>
-                  {e.dkOdds && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, marginTop: 1 }}>DK {e.dkOdds}</div>}
-                </div>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, margin: "3px 0 6px" }}>
-                <div style={{ fontSize: 11, color: T.dim }}>{e.game}</div>
-                {e.start && <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, whiteSpace: "nowrap" }}>{fmtWhen(e.start)}</div>}
-              </div>
-              <ProbBar pct={e.pct} />
-            </button>
-          ))}
+          {edge.map((e, i) => {
+            const id = `edge-${e.pick}-${e.game}`;
+            return (
+              <PickRow
+                key={id} id={id} index={i}
+                title={e.pick}
+                subtitle={e.game}
+                timeLabel={fmtWhen(e.start)}
+                pct={e.pct}
+                primaryOdds={"FD " + e.odds}
+                secondaryOdds={e.dkOdds ? "DK " + e.dkOdds : null}
+                inCart={isInCart(id)}
+                onToggleCart={() => addToCart({ id, pick: e.pick, game: e.game, odds: e.odds, source: "edge", pct: e.pct })}
+                onAsk={() => onAsk(`Pull full stats and reasoning for ${e.pick} (${e.game}) — recent form, matchup, injuries, weather if relevant. Is it worth anchoring a slip?`)}
+              />
+            );
+          })}
           <div style={{ fontSize: 11, color: T.dim, marginTop: 12, lineHeight: 1.5 }}>
-            Want player props ranked instead? Switch to the Props tab above.
+            Market-based probability, not independent research — the take/lean/pass call here reflects how strong the favorite is, not a researched edge. Switch to Props for AI-scored picks.
           </div>
         </div>
       )}
@@ -526,7 +730,8 @@ function MultiSeg({ options, values, onChange }) {
 }
 
 /* ================= BUILDER ================= */
-function ParlayTab({ onSaveSlip }) {
+function ParlayTab({ onSaveSlip, cart, removeFromCart, clearCart, reviewSignal }) {
+  const [subMode, setSubMode] = useState("auto");
   const [sports, setSports] = useState(["MLB"]);
   const [legs, setLegs] = useState(3);
   const [style, setStyle] = useState("Balanced");
@@ -535,6 +740,11 @@ function ParlayTab({ onSaveSlip }) {
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState("");
   const [err, setErr] = useState("");
+  const [analysis, setAnalysis] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeErr, setAnalyzeErr] = useState("");
+
+  useEffect(() => { if (reviewSignal) setSubMode("mypicks"); }, [reviewSignal]);
 
   const SPORT_KEY = { "MLB": "mlb", "World Cup": "worldcup", "NBA": "nba", "NFL": "nfl", "NHL": "nhl" };
 
@@ -592,9 +802,44 @@ function ParlayTab({ onSaveSlip }) {
     } finally { setBusy(false); setPhase(""); }
   }
 
+  async function hyperAnalyze() {
+    if (analyzing || cart.length === 0) return;
+    setAnalyzing(true); setAnalyzeErr(""); setAnalysis("");
+    try {
+      const legsText = cart.map((c, i) => `${i + 1}. ${c.pick} — ${c.game} (${c.odds || "odds unknown"})${c.why ? " — flagged edge: " + c.why : ""}${c.pct != null ? ` — shown at ${c.pct}%` : ""}`).join("\n");
+      const prompt = `Here are the legs I've manually selected for a parlay:\n${legsText}\n\nHyper-analyze this exact slip.`;
+      const reply = await apiChat([{ role: "user", content: prompt }], { system: HYPER_ANALYZE_SYSTEM + historyBlock(), useSearch: true, max_tokens: 2500 });
+      setAnalysis(reply);
+    } catch (e) {
+      setAnalyzeErr("Analysis failed — try again. (" + e.message + ")");
+    } finally { setAnalyzing(false); }
+  }
+
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>Build a slip</H1>
+      <div style={{ display: "flex", gap: 6, margin: "12px 0 4px" }}>
+        {[["auto", "Auto-Build"], ["mypicks", "My Picks"]].map(([k, label]) => (
+          <button key={k} onClick={() => setSubMode(k)} style={{
+            flex: 1, padding: "10px 0", borderRadius: 10, border: `1.5px solid ${subMode === k ? T.amber : T.line}`,
+            background: subMode === k ? T.amber : "transparent", color: subMode === k ? "#1A1300" : T.dim,
+            fontFamily: D, fontWeight: 700, fontSize: 13.5, letterSpacing: 0.5, textTransform: "uppercase", cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
+          }}>
+            {label}
+            {k === "mypicks" && cart.length > 0 && (
+              <span style={{
+                background: subMode === k ? "#1A1300" : T.phosphor, color: subMode === k ? T.amber : "#04201E",
+                borderRadius: 99, fontFamily: M, fontSize: 10, fontWeight: 700, width: 17, height: 17,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>{cart.length}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {subMode === "auto" && (
+        <>
       <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14 }}>
         <div>
           <div style={lbl}>Slate — tap to mix multiple</div>
@@ -622,11 +867,58 @@ function ParlayTab({ onSaveSlip }) {
           </div>
         )}
       </div>
+        </>
+      )}
+
+      {subMode === "mypicks" && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, marginBottom: 10 }}>
+            Picks you've tapped + on, from Board
+          </div>
+          {cart.length === 0 ? (
+            <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 30, lineHeight: 1.6 }}>
+              Nothing here yet. Go to the Board tab, tap <b style={{ color: T.text }}>+</b> on any pick, and it lands here.
+            </div>
+          ) : (
+            <>
+              {cart.map((c) => (
+                <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12, padding: "11px 13px", marginBottom: 8 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{c.pick}</div>
+                    <div style={{ fontSize: 11, color: T.dim, marginTop: 2 }}>{c.game}{c.pct != null ? ` · ${c.pct}%` : ""}</div>
+                  </div>
+                  {c.odds && <div style={{ fontFamily: M, fontSize: 12.5, color: String(c.odds).startsWith("-") ? T.red : T.green, flexShrink: 0 }}>{c.odds}</div>}
+                  <button onClick={() => removeFromCart(c.id)} aria-label="Remove" style={{ background: "transparent", border: "none", color: T.dim, fontSize: 20, cursor: "pointer", padding: "0 2px", lineHeight: 1 }}>×</button>
+                </div>
+              ))}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px 4px" }}>
+                <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: T.dim }}>Combined (est.)</span>
+                <span style={{ fontFamily: M, fontWeight: 700, fontSize: 18, color: T.amber }}>{combinedOdds(cart)}</span>
+              </div>
+              <button onClick={hyperAnalyze} disabled={analyzing} style={{
+                width: "100%", background: T.phosphor, border: "none", borderRadius: 12, padding: "14px 0",
+                fontFamily: D, fontWeight: 800, fontSize: 18, letterSpacing: 1, color: "#04201E",
+                cursor: "pointer", textTransform: "uppercase", opacity: analyzing ? 0.5 : 1, marginTop: 10,
+              }}>{analyzing ? "Hyper-analyzing…" : "Hyper-Analyze This Slip"}</button>
+              {analyzing && <Spinner label="Checking every leg — status, lines, matchups…" />}
+              {analyzeErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{analyzeErr}</div>}
+              <button onClick={clearCart} style={{
+                width: "100%", background: "transparent", border: `1px solid ${T.line}`, borderRadius: 12, padding: "10px 0",
+                fontFamily: D, fontWeight: 700, fontSize: 13, letterSpacing: 1, color: T.dim, cursor: "pointer", textTransform: "uppercase", marginTop: 8,
+              }}>Clear all picks</button>
+              {analysis && (
+                <div style={{ background: T.surface, border: `1px solid ${T.line}`, borderRadius: 14, padding: 16, marginTop: 14, whiteSpace: "pre-wrap", fontSize: 13.5, lineHeight: 1.6, color: T.text }}>
+                  {analysis}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-/* ================= TRENDING ================= */
 /* ================= TODAY (everything still bettable, across every sport) ================= */
 const ALL_SPORTS = [
   { key: "mlb", label: "MLB" },
@@ -829,10 +1121,13 @@ function TrendingTab() {
 /* ================= MY SLIPS ================= */
 function SlipsTab({ slips, setSlips }) {
   const [showImport, setShowImport] = useState(false);
+  const [importTab, setImportTab] = useState("photo");
   const [pasteText, setPasteText] = useState("");
   const [pasteResult, setPasteResult] = useState("win");
   const [importing, setImporting] = useState(false);
   const [impErr, setImpErr] = useState("");
+  const [shotImage, setShotImage] = useState(null);
+  const fileRef = useRef(null);
 
   const graded = slips.filter((s) => s && (s.result === "win" || s.result === "loss"));
   const liveCount = slips.filter((s) => s && s.result === "live").length;
@@ -842,6 +1137,40 @@ function SlipsTab({ slips, setSlips }) {
   function mark(i, result) {
     const next = slips.map((s, j) => (j === i ? { ...s, result } : s));
     setSlips(next); saveSlips(next);
+  }
+
+  function onPickShot(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    setImpErr("");
+    compressImageFile(f).then(setShotImage).catch((err) => setImpErr(err.message));
+    e.target.value = "";
+  }
+
+  async function importFromPhoto() {
+    if (!shotImage || importing) return;
+    setImporting(true); setImpErr("");
+    try {
+      const raw = await apiChat(
+        [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: shotImage.media_type, data: shotImage.base64 } },
+          { type: "text", text: `This is a screenshot of a bet slip (win or loss result). Read every leg, the odds, and the combined price. Respond ONLY raw JSON: {"title":"short title","legs":[{"pick":"...","game":"...","odds":"..."}],"combined_odds":"..."}` },
+        ] }],
+        { useSearch: false, max_tokens: 1200 }
+      );
+      const clean = String(raw).replace(/```json|```/g, "").trim();
+      const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
+      if (a < 0 || b < 0) throw new Error("Couldn't read that screenshot");
+      const slip = JSON.parse(clean.slice(a, b + 1));
+      slip.result = pasteResult;
+      slip.created = new Date().toISOString();
+      slip.imported = true;
+      const next = [slip, ...slips];
+      setSlips(next); saveSlips(next);
+      setShotImage(null); setShowImport(false);
+    } catch (e) {
+      setImpErr("Couldn't read that screenshot — try a clearer photo. (" + e.message + ")");
+    } finally { setImporting(false); }
   }
 
   async function importSlip() {
@@ -887,20 +1216,62 @@ function SlipsTab({ slips, setSlips }) {
 
       {showImport && (
         <div style={{ background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12, padding: 12, marginTop: 10 }}>
-          <div style={{ fontSize: 12.5, color: T.dim, marginBottom: 8, lineHeight: 1.5 }}>
-            Paste legs from your FanDuel bet history — the AI parses it into a ticket. Log old wins and losses so recommendations learn what hits for you.
+          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+            {[["photo", "Upload screenshot"], ["text", "Paste text"]].map(([k, label]) => (
+              <button key={k} onClick={() => setImportTab(k)} style={{
+                flex: 1, padding: "8px 0", borderRadius: 8, border: `1.5px solid ${importTab === k ? T.phosphor : T.line}`,
+                background: importTab === k ? T.phosphor + "22" : "transparent", color: importTab === k ? T.phosphor : T.dim,
+                fontFamily: D, fontWeight: 700, fontSize: 12.5, letterSpacing: 0.5, textTransform: "uppercase", cursor: "pointer",
+              }}>{label}</button>
+            ))}
           </div>
-          <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={4}
-            placeholder={"e.g.\nYordan Alvarez to hit a HR +320\nDodgers ML -145\nCombined +510"}
-            style={{ width: "100%", background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 8, padding: 10, color: T.text, fontSize: 13, outline: "none", resize: "vertical", fontFamily: "'Inter', sans-serif" }} />
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <div style={{ flex: 1 }}><Seg options={["win", "loss"]} value={pasteResult} onChange={setPasteResult} /></div>
-            <button onClick={importSlip} disabled={importing} style={{
-              background: T.amber, border: "none", borderRadius: 10, padding: "0 16px",
-              fontFamily: D, fontWeight: 700, fontSize: 15, color: "#1A1300", cursor: "pointer",
-              textTransform: "uppercase", opacity: importing ? 0.5 : 1,
-            }}>{importing ? "…" : "Save"}</button>
-          </div>
+
+          {importTab === "photo" ? (
+            <>
+              <div style={{ fontSize: 12.5, color: T.dim, marginBottom: 8, lineHeight: 1.5 }}>
+                Upload a screenshot of your FanDuel bet history — win or loss. The AI reads it directly, no typing needed.
+              </div>
+              <input ref={fileRef} type="file" accept="image/*" onChange={onPickShot} style={{ display: "none" }} />
+              {shotImage ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 8, padding: 8, marginBottom: 8 }}>
+                  <img src={shotImage.dataUrl} alt="slip screenshot" style={{ height: 52, width: 52, objectFit: "cover", borderRadius: 6 }} />
+                  <div style={{ flex: 1, fontSize: 12.5, color: T.dim }}>Screenshot ready</div>
+                  <button onClick={() => setShotImage(null)} style={{ background: "transparent", border: "none", color: T.red, fontFamily: D, fontWeight: 700, fontSize: 13, cursor: "pointer", textTransform: "uppercase" }}>Remove</button>
+                </div>
+              ) : (
+                <button onClick={() => fileRef.current && fileRef.current.click()} style={{
+                  width: "100%", padding: "20px 0", borderRadius: 10, border: `1.5px dashed ${T.line}`,
+                  background: T.surface2, color: T.dim, fontFamily: D, fontWeight: 700, fontSize: 14,
+                  letterSpacing: 0.5, textTransform: "uppercase", cursor: "pointer", marginBottom: 8,
+                }}>📷 Choose a screenshot</button>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Seg options={["win", "loss"]} value={pasteResult} onChange={setPasteResult} /></div>
+                <button onClick={importFromPhoto} disabled={importing || !shotImage} style={{
+                  background: T.amber, border: "none", borderRadius: 10, padding: "0 16px",
+                  fontFamily: D, fontWeight: 700, fontSize: 15, color: "#1A1300", cursor: "pointer",
+                  textTransform: "uppercase", opacity: (importing || !shotImage) ? 0.5 : 1,
+                }}>{importing ? "…" : "Save"}</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 12.5, color: T.dim, marginBottom: 8, lineHeight: 1.5 }}>
+                Paste legs from your FanDuel bet history — the AI parses it into a ticket.
+              </div>
+              <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={4}
+                placeholder={"e.g.\nYordan Alvarez to hit a HR +320\nDodgers ML -145\nCombined +510"}
+                style={{ width: "100%", background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 8, padding: 10, color: T.text, fontSize: 13, outline: "none", resize: "vertical", fontFamily: "'Inter', sans-serif" }} />
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <div style={{ flex: 1 }}><Seg options={["win", "loss"]} value={pasteResult} onChange={setPasteResult} /></div>
+                <button onClick={importSlip} disabled={importing} style={{
+                  background: T.amber, border: "none", borderRadius: 10, padding: "0 16px",
+                  fontFamily: D, fontWeight: 700, fontSize: 15, color: "#1A1300", cursor: "pointer",
+                  textTransform: "uppercase", opacity: importing ? 0.5 : 1,
+                }}>{importing ? "…" : "Save"}</button>
+              </div>
+            </>
+          )}
           {impErr && <div style={{ color: T.red, fontSize: 12.5, marginTop: 6 }}>{impErr}</div>}
         </div>
       )}
@@ -926,6 +1297,8 @@ function AppInner() {
   const [tab, setTab] = useState("chat");
   const [slips, setSlips] = useState(loadSlips);
   const [askSignal, setAskSignal] = useState({ text: "", ts: 0 });
+  const [cart, setCart] = useState(loadCart);
+  const [reviewSignal, setReviewSignal] = useState(0);
 
   function addSlip(slip) {
     setSlips((prev) => { const next = [slip, ...prev]; saveSlips(next); return next; });
@@ -935,6 +1308,20 @@ function AppInner() {
   // asked twice in a row, and works without remounting the Desk (which would
   // wipe its conversation — the whole point of keeping tabs alive).
   function askFromBoard(q) { setAskSignal({ text: q, ts: Date.now() }); setTab("chat"); }
+
+  function addToCart(item) {
+    setCart((prev) => {
+      if (prev.some((p) => p.id === item.id)) return prev; // already in
+      const next = [...prev, item];
+      saveCart(next);
+      return next;
+    });
+  }
+  function removeFromCart(id) {
+    setCart((prev) => { const next = prev.filter((p) => p.id !== id); saveCart(next); return next; });
+  }
+  function isInCart(id) { return cart.some((p) => p.id === id); }
+  function goReviewCart() { setTab("parlay"); setReviewSignal(Date.now()); }
 
   const TABS = [["chat", "Desk"], ["today", "Today"], ["board", "Board"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "Slips"]];
 
@@ -946,44 +1333,81 @@ function AppInner() {
   );
 
   return (
-    <div style={{ minHeight: "100dvh", display: "flex", justifyContent: "center", background: "#080A0E", fontFamily: "'Inter', sans-serif" }}>
+    <div style={{ minHeight: "100dvh", display: "flex", justifyContent: "center", background: "#050708", fontFamily: "'Inter', sans-serif" }}>
       <style>{`
         * { box-sizing: border-box; margin: 0; }
-        body { background: #080A0E; }
+        body { background: #050708; }
         input::placeholder, textarea::placeholder { color: ${T.dim}99; }
         .pulse { animation: pulse 1.1s ease-in-out infinite; display: inline-block; }
         @keyframes pulse { 0%,100% { opacity:.35 } 50% { opacity:1 } }
-        @media (prefers-reduced-motion: reduce) { .pulse { animation: none } }
+        .ticker-track { animation: ticker-scroll 38s linear infinite; }
+        @keyframes ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+        @media (prefers-reduced-motion: reduce) { .pulse { animation: none } .ticker-track { animation: none } }
         button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visible { outline: 2px solid ${T.amber}; outline-offset: 2px; }
+        button { transition: opacity .12s ease, transform .12s ease; }
+        button:active { transform: scale(0.97); }
       `}</style>
 
-      <div style={{ width: "100%", maxWidth: 680, height: "100dvh", display: "flex", flexDirection: "column", background: T.bg, borderLeft: `1px solid ${T.line}`, borderRight: `1px solid ${T.line}` }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px 10px", borderBottom: `1px solid ${T.line}` }}>
-          <div style={{ fontFamily: D, fontWeight: 800, fontSize: 22, letterSpacing: 1.5, color: T.text, textTransform: "uppercase" }}>
+      <div style={{
+        width: "100%", maxWidth: 680, height: "100dvh", display: "flex", flexDirection: "column",
+        background: `linear-gradient(180deg, ${T.bg} 0%, #090C10 100%)`,
+        borderLeft: `1px solid ${T.line}`, borderRight: `1px solid ${T.line}`,
+        boxShadow: "0 0 60px rgba(0,0,0,0.5)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 16px 12px" }}>
+          <div style={{ fontFamily: D, fontWeight: 800, fontSize: 23, letterSpacing: 1.5, color: T.text, textTransform: "uppercase" }}>
             Slip<span style={{ color: T.amber }}>Lab</span>
           </div>
-          <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim, letterSpacing: 1 }}>LIVE DATA</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span className="pulse" style={{ width: 6, height: 6, borderRadius: 99, background: T.phosphor, display: "inline-block" }} />
+            <div style={{ fontFamily: M, fontSize: 10, color: T.dim, letterSpacing: 1.5 }}>LIVE</div>
+          </div>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0 }}>
+        <LiveTicker />
+
+        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
           <Boundary>
             {keep("chat", <ChatTabCore askSignal={askSignal} />)}
             {keep("today", <TodayTab onAsk={askFromBoard} />)}
-            {keep("board", <BoardTab onAsk={askFromBoard} />)}
-            {keep("parlay", <ParlayTab onSaveSlip={addSlip} />)}
+            {keep("board", <BoardTab onAsk={askFromBoard} cart={cart} addToCart={addToCart} isInCart={isInCart} onReviewCart={goReviewCart} />)}
+            {keep("parlay", <ParlayTab onSaveSlip={addSlip} cart={cart} removeFromCart={removeFromCart} clearCart={() => { setCart([]); saveCart([]); }} reviewSignal={reviewSignal} />)}
             {keep("trend", <TrendingTab />)}
             {keep("slips", <SlipsTab slips={slips} setSlips={setSlips} />)}
           </Boundary>
+
+          {cart.length > 0 && tab !== "parlay" && (
+            <button onClick={goReviewCart} style={{
+              position: "absolute", left: 14, right: 14, bottom: 14,
+              background: T.amber, border: "none", borderRadius: 14, padding: "13px 16px",
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.1)", cursor: "pointer",
+            }}>
+              <span style={{ fontFamily: D, fontWeight: 800, fontSize: 15, letterSpacing: 0.5, color: "#1A1300", textTransform: "uppercase" }}>
+                {cart.length} pick{cart.length > 1 ? "s" : ""} selected
+              </span>
+              <span style={{ fontFamily: D, fontWeight: 800, fontSize: 15, letterSpacing: 0.5, color: "#1A1300" }}>Review →</span>
+            </button>
+          )}
         </div>
 
         <div style={{ display: "flex", borderTop: `1px solid ${T.line}`, background: T.bg, paddingBottom: "env(safe-area-inset-bottom)" }}>
           {TABS.map(([k, label]) => (
             <button key={k} onClick={() => setTab(k)} style={{
-              flex: 1, padding: "12px 0 10px", background: "transparent", border: "none", cursor: "pointer",
-              fontFamily: D, fontWeight: 700, fontSize: 14, letterSpacing: 1, textTransform: "uppercase",
+              flex: 1, padding: "12px 0 10px", background: "transparent", border: "none", cursor: "pointer", position: "relative",
+              fontFamily: D, fontWeight: 700, fontSize: 13.5, letterSpacing: 1, textTransform: "uppercase",
               color: tab === k ? T.amber : T.dim,
-              borderTop: tab === k ? `2px solid ${T.amber}` : "2px solid transparent",
-            }}>{label}</button>
+            }}>
+              {label}
+              {k === "parlay" && cart.length > 0 && (
+                <span style={{
+                  position: "absolute", top: 4, right: "50%", marginRight: -22,
+                  background: T.phosphor, color: "#04201E", fontFamily: M, fontWeight: 700, fontSize: 9.5,
+                  borderRadius: 99, width: 15, height: 15, display: "flex", alignItems: "center", justifyContent: "center",
+                }}>{cart.length}</span>
+              )}
+              {tab === k && <span style={{ position: "absolute", bottom: 0, left: "20%", right: "20%", height: 2, background: T.amber, borderRadius: 2 }} />}
+            </button>
           ))}
         </div>
       </div>
@@ -1007,31 +1431,8 @@ function ChatTabCore({ askSignal }) {
   function onPickImage(e) {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    if (!/^image\//.test(f.type)) return;
     setImgErr("");
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        // Resize down so the payload never trips the server's size limit —
-        // phone screenshots (often 1170x2532+, 1-4MB) fail uploads otherwise.
-        const MAX_W = 1000;
-        const scale = Math.min(1, MAX_W / img.width);
-        const w = Math.round(img.width * scale);
-        const h = Math.round(img.height * scale);
-        const canvas = document.createElement("canvas");
-        canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, w, h);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-        const base64 = dataUrl.split(",")[1];
-        setImage({ dataUrl, media_type: "image/jpeg", base64 });
-      };
-      img.onerror = () => setImgErr("Couldn't read that image — try a different screenshot.");
-      img.src = String(reader.result);
-    };
-    reader.onerror = () => setImgErr("Couldn't read that file.");
-    reader.readAsDataURL(f);
+    compressImageFile(f).then(setImage).catch((err) => setImgErr(err.message));
     e.target.value = "";
   }
 
