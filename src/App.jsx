@@ -38,13 +38,13 @@ class Boundary extends React.Component {
 }
 
 /* ================= API ================= */
-async function apiChat(messages, { system, useSearch = true, max_tokens = 1500 } = {}) {
+async function apiChat(messages, { system, useSearch = true, max_tokens = 1500, model } = {}) {
   let r;
   try {
     r = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages, system, useSearch, max_tokens }),
+      body: JSON.stringify({ messages, system, useSearch, max_tokens, model }),
     });
   } catch (e) {
     throw new Error("Network error reaching the server — check your connection and try again.");
@@ -342,7 +342,9 @@ function Ticket({ slip, onResult }) {
 }
 
 /* ================= BOARD (live lines + edge leaderboard) ================= */
-const PROPS_SYSTEM = `You are a professional player-prop analyst ranking today's slate. FIRST web search today's date and which games are actually being played today in the requested sport. Then for each candidate prop, work the full methodology: confirmed lineups/starters, matchup splits (batter/pitcher handedness, defensive matchup), park factors and weather (wind speed/direction, temp — critical for MLB totals/power props), bullpen or rotation fatigue, rest/travel, and current line movement. If you can find the same prop line at both FanDuel and DraftKings, note both in the odds field like "FD -115 / DK -120" — otherwise just give the one you found. Convert each prop's odds to implied probability (implied_prob) and compare it to your own honest estimate (est_prob) — edge_pts is est_prob minus implied_prob. Set verdict to "take" only when edge_pts is a real, wide margin (roughly 5+ points) backed by a concrete factor, "lean" for a smaller genuine edge (2-5 points), or "pass" when the line is priced about right or your estimate doesn't clear it — include pass entries too if they're close calls worth flagging, don't just omit them. Respond ONLY with raw JSON, no fences: {"slate_note":"e.g. 8 MLB games today, wind blowing out at Wrigley","props":[{"player":"name","prop":"market + line (e.g. Over 6.5 Ks)","game":"AWY @ HOM","odds":"-115","implied_prob":56,"est_prob":62,"edge_pts":6,"verdict":"take","why":"the single strongest factor — matchup, weather, form, or park"}]} — return 10 to 14 props total, mostly real edges but a couple of honest passes are fine, ranked by edge_pts descending, spread across multiple games. Every probability is a calibrated number you'd stake your own money on being right, never inflated for excitement. If no games today, return {"slate_note":"No games today","props":[]}.${ANALYST_CORE}`;
+// Note: player-prop scoring now happens server-side in api/props.js (cached,
+// shared across all visitors) instead of an on-demand client call — see
+// that file for the analyst prompt used there.
 
 function devig(outcomes) {
   // Convert American odds to implied probs, remove the vig by normalizing
@@ -377,8 +379,10 @@ function verdictFor(pct, explicit) {
     if (v.includes("lean")) return "LEAN";
   }
   if (pct == null) return null;
-  if (pct >= 58) return "TAKE";
-  if (pct >= 51) return "LEAN";
+  // Raised bar: a good number alone isn't a lock, so TAKE is reserved for
+  // genuinely heavy favorites, not anything over ~55%.
+  if (pct >= 65) return "TAKE";
+  if (pct >= 54) return "LEAN";
   return "PASS";
 }
 
@@ -509,6 +513,7 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
   const [propBusy, setPropBusy] = useState(false);
   const [propErr, setPropErr] = useState("");
   const [slateNote, setSlateNote] = useState("");
+  const [propMeta, setPropMeta] = useState(null); // { cached, cacheAgeSec }
 
   useEffect(() => {
     let dead = false;
@@ -542,25 +547,27 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
   }
   edge.sort((a, b) => b.pct - a.pct);
 
-  async function scoreProps() {
-    if (propBusy) return;
-    setPropBusy(true); setPropErr(""); setSlateNote("");
-    try {
-      const raw = await apiChat(
-        [{ role: "user", content: `Rank today's best ${sport.toUpperCase()} player props across every game being played today. Return ONLY the JSON.` }],
-        { system: PROPS_SYSTEM, useSearch: true, max_tokens: 3500 }
-      );
-      const clean = String(raw).replace(/```json|```/g, "").trim();
-      const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
-      if (a < 0 || b < 0) throw new Error("No scores returned — run it again");
-      const parsed = JSON.parse(clean.slice(a, b + 1));
-      setSlateNote(parsed.slate_note || "");
-      const list = (parsed.props || []).filter((p) => p && p.player).sort((x, y) => (y.est_prob || 0) - (x.est_prob || 0));
-      setProps(list);
-    } catch (e) {
-      setPropErr("Scoring failed — run it again. (" + e.message + ")");
-    } finally { setPropBusy(false); }
+  // Props now load automatically from a server-side CACHED endpoint — the
+  // expensive AI research runs once per ~15 min per sport and every visitor
+  // shares that result, instead of paying for a fresh run on every tap.
+  function loadProps(force) {
+    setPropBusy(true); setPropErr("");
+    fetch(`/api/props?sport=${sport}${force ? "&refresh=1" : ""}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) { setPropErr(d.error); return; }
+        setSlateNote(d.slate_note || "");
+        setProps(d.props || []);
+        setPropMeta({ cached: d.cached, cacheAgeSec: d.cacheAgeSec });
+      })
+      .catch((e) => setPropErr(e.message))
+      .finally(() => setPropBusy(false));
   }
+  useEffect(() => {
+    setProps(null); setPropMeta(null);
+    loadProps(false);
+    // eslint-disable-next-line
+  }, [sport]);
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
@@ -576,17 +583,22 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
 
       {mode === "Props" && (
         <div>
-          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, margin: "4px 0 8px" }}>
-            Every player prop scored, with a take/lean/pass call · tap + to build a slip
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", margin: "4px 0 8px" }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim }}>
+              Every category scored · tap a name for their full options
+            </div>
+            <button onClick={() => loadProps(true)} disabled={propBusy} style={{
+              background: "transparent", border: "none", color: T.phosphor, fontFamily: D, fontWeight: 700,
+              fontSize: 11.5, letterSpacing: 0.5, textTransform: "uppercase", cursor: "pointer", opacity: propBusy ? 0.5 : 1, whiteSpace: "nowrap",
+            }}>{propBusy ? "…" : "↻ Refresh"}</button>
           </div>
-          <button onClick={scoreProps} disabled={propBusy} style={{
-            width: "100%", background: T.amber, border: "none", borderRadius: 12, padding: "13px 0",
-            fontFamily: D, fontWeight: 800, fontSize: 18, letterSpacing: 1, color: "#1A1300",
-            cursor: "pointer", textTransform: "uppercase", opacity: propBusy ? 0.5 : 1,
-          }}>{propBusy ? "Ranking the slate…" : props_ ? "Refresh rankings" : `Rank today's ${sport.toUpperCase()} props`}</button>
-          {propBusy && <Spinner label="Checking today's games, lineups, and lines…" />}
+          {propBusy && !props_ && <Spinner label="Checking today's games, lineups, and lines…" />}
           {propErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{propErr}</div>}
-          {slateNote && <div style={{ fontFamily: M, fontSize: 12, color: T.phosphor, margin: "10px 0 4px" }}>● {slateNote}</div>}
+          {slateNote && (
+            <div style={{ fontFamily: M, fontSize: 12, color: T.phosphor, margin: "6px 0 4px" }}>
+              ● {slateNote}{propMeta?.cached && propMeta.cacheAgeSec != null && <span style={{ color: T.dim }}> · updated {Math.max(1, Math.round(propMeta.cacheAgeSec / 60))}m ago</span>}
+            </div>
+          )}
           <div style={{ marginTop: 10 }}>
             {(props_ || []).map((p, i) => {
               const gameMatch = findGameForText(p.game, games);
@@ -603,14 +615,14 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
                   primaryOdds={p.odds}
                   inCart={isInCart(id)}
                   onToggleCart={() => addToCart({ id, pick: `${p.player} ${p.prop}`, game: p.game, odds: p.odds, source: "props", pct: Math.round(p.est_prob ?? 0), why: p.why })}
-                  onAsk={() => onAsk(`Pull full stats and matchup context for ${p.player} — ${p.prop} (${p.game}). Show recent performance trends, the specific matchup/split that supports it, and explain exactly why it should hit. Worth a leg today?`)}
+                  onAsk={() => onAsk(`Give me every prop market available today for ${p.player} (${p.game}) — hits, total bases, HR, RBI, runs, walks, whatever applies to their position — with your probability and take/lean/pass call on each. Then tell me which single option is the best play.`)}
                 />
               );
             })}
           </div>
           {props_ && props_.length > 0 && (
             <div style={{ fontSize: 11, color: T.dim, marginTop: 10, lineHeight: 1.5 }}>
-              AI estimates from live research, not sportsbook-implied — always confirm the number on FanDuel before locking.
+              AI estimates from live research, not sportsbook-implied — always confirm the number on FanDuel/DraftKings before locking. "Take" is reserved for near-lock cases only.
             </div>
           )}
           {props_ && props_.length === 0 && !propBusy && (
@@ -1046,7 +1058,7 @@ function TrendingTab() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
   const [sportFilter, setSportFilter] = useState("All");
-  const [volTier, setVolTier] = useState("High");
+  const [volTier, setVolTier] = useState("Tens of $K+");
 
   useEffect(() => {
     let dead = false;
@@ -1057,7 +1069,7 @@ function TrendingTab() {
   }, []);
 
   const SPORT_WORDS = /world cup|mlb|nba|nfl|nhl|match|game|win|beat|score|vs\.?|champion|finals|cup|series|goal/i;
-  const VOL_FLOOR = { "Whale": 100000, "High": 25000, "All": 0 };
+  const VOL_FLOOR = { "Whale ($100K+)": 100000, "Tens of $K+": 10000, "All": 0 };
   const floor = VOL_FLOOR[volTier] ?? 0;
 
   const markets = (data?.markets || [])
@@ -1071,11 +1083,14 @@ function TrendingTab() {
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>What the market's on</H1>
       <div style={{ color: T.dim, fontSize: 12.5, margin: "6px 0 12px" }}>
-        Polymarket + Kalshi merged — where real money is piling up, ranked by 24h volume.
+        Polymarket + Kalshi merged, ranked by 24h volume — the biggest positions on the board right now.
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <Seg options={["Whale", "High", "All"]} value={volTier} onChange={setVolTier} />
+        <Seg options={["Whale ($100K+)", "Tens of $K+", "All"]} value={volTier} onChange={setVolTier} />
         <Seg options={["All", "Sports"]} value={sportFilter} onChange={setSportFilter} />
+      </div>
+      <div style={{ fontSize: 10.5, color: T.dim, marginTop: 8, lineHeight: 1.5 }}>
+        This ranks by total money moving on a market, which is the best free public signal for "where the big positions are" — Polymarket and Kalshi don't publish a named-trader leaderboard, so this shows the markets themselves, not who's behind them.
       </div>
       {(errs.polymarket || errs.kalshi) && (
         <div style={{ fontSize: 11, color: T.dim, marginTop: 8 }}>
@@ -1463,11 +1478,16 @@ function ChatTabCore({ askSignal }) {
 
     // API history: reuse prior text messages + this one (images only on current turn)
     const apiHistory = msgs.map((m) => ({ role: m.role, content: m.content })).concat([apiMsg]);
+    // Cost routing: quick plain-text questions use Haiku (fast, cheap).
+    // Deep Research and anything with an attached image stay on Sonnet,
+    // since those need the stronger reasoning/vision quality.
+    const useHaiku = !deep && !image;
     try {
       const reply = await apiChat(apiHistory, {
         system: (deep ? DEEP_SYSTEM : CHAT_SYSTEM) + historyBlock(),
         useSearch: true,
-        max_tokens: deep ? 3000 : 1500,
+        max_tokens: deep ? 3000 : 1200,
+        model: useHaiku ? "claude-haiku-4-5-20251001" : undefined,
       });
       setMsgs((m) => [...m, { role: "assistant", content: reply || "(empty response)" }]);
     } catch (e) {
