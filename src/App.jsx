@@ -553,7 +553,19 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
   function loadProps(force) {
     setPropBusy(true); setPropErr("");
     fetch(`/api/props?sport=${sport}${force ? "&refresh=1" : ""}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        const raw = await r.text();
+        let d;
+        try { d = JSON.parse(raw); }
+        catch {
+          // The server returned HTML (usually a 404 page), not JSON — this
+          // means api/props.js hasn't been deployed yet, not a data problem.
+          throw new Error(r.status === 404
+            ? "Props endpoint not found (404) — make sure api/props.js was added to your GitHub repo and deployed."
+            : `Server returned an unexpected response (status ${r.status}) instead of data.`);
+        }
+        return d;
+      })
       .then((d) => {
         if (d.error) { setPropErr(d.error); return; }
         setSlateNote(d.slate_note || "");
@@ -1058,7 +1070,7 @@ function TrendingTab() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
   const [sportFilter, setSportFilter] = useState("All");
-  const [volTier, setVolTier] = useState("Tens of $K+");
+  const [volTier, setVolTier] = useState("Whale ($100K+)");
 
   useEffect(() => {
     let dead = false;
@@ -1069,7 +1081,7 @@ function TrendingTab() {
   }, []);
 
   const SPORT_WORDS = /world cup|mlb|nba|nfl|nhl|match|game|win|beat|score|vs\.?|champion|finals|cup|series|goal/i;
-  const VOL_FLOOR = { "Whale ($100K+)": 100000, "Tens of $K+": 10000, "All": 0 };
+  const VOL_FLOOR = { "Mega ($500K+)": 500000, "Whale ($100K+)": 100000, "All": 0 };
   const floor = VOL_FLOOR[volTier] ?? 0;
 
   const markets = (data?.markets || [])
@@ -1083,15 +1095,19 @@ function TrendingTab() {
     <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
       <H1>What the market's on</H1>
       <div style={{ color: T.dim, fontSize: 12.5, margin: "6px 0 12px" }}>
-        Polymarket + Kalshi merged, ranked by 24h volume — the biggest positions on the board right now.
+        Polymarket + Kalshi merged, ranked by 24h volume — the biggest positions moving right now, and which side they're on.
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <Seg options={["Whale ($100K+)", "Tens of $K+", "All"]} value={volTier} onChange={setVolTier} />
+        <Seg options={["Mega ($500K+)", "Whale ($100K+)", "All"]} value={volTier} onChange={setVolTier} />
         <Seg options={["All", "Sports"]} value={sportFilter} onChange={setSportFilter} />
       </div>
-      <div style={{ fontSize: 10.5, color: T.dim, marginTop: 8, lineHeight: 1.5 }}>
-        This ranks by total money moving on a market, which is the best free public signal for "where the big positions are" — Polymarket and Kalshi don't publish a named-trader leaderboard, so this shows the markets themselves, not who's behind them.
+
+      <div style={{ background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
+        <div style={{ fontSize: 11, color: T.dim, lineHeight: 1.6 }}>
+          <b style={{ color: T.text }}>Straight answer on wallet tracking:</b> Kalshi is a regulated exchange — it never exposes who's behind a trade, so there's no "wallet" to follow there, full stop. Polymarket runs on a public blockchain, so wallet activity technically exists, but reliably tying it to win-rates and building a real leaderboard needs infrastructure I can't stand up and verify in one pass — I'd rather not ship something that looks like insider tracking but is actually guessing. What you're seeing below is the honest version: real 24h dollar volume per market, ranked, which is the strongest free public signal for "where the big money is" even without names attached.
+        </div>
       </div>
+
       {(errs.polymarket || errs.kalshi) && (
         <div style={{ fontSize: 11, color: T.dim, marginTop: 8 }}>
           {errs.polymarket && "Polymarket unavailable right now. "}
@@ -1102,32 +1118,46 @@ function TrendingTab() {
         {!data && !err && <Spinner label="Pulling live market volume…" />}
         {err && <div style={{ color: T.red, fontSize: 13 }}>{err}</div>}
         {data && markets.length === 0 && (
-          <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 20 }}>Nothing at this volume tier right now — try "All".</div>
+          <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 20 }}>Nothing at this volume tier right now — try "Whale" or "All".</div>
         )}
-        {markets.map((m) => (
-          <a key={m.id} href={m.url} target="_blank" rel="noreferrer" style={{
-            display: "block", background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12,
-            padding: "12px 14px", marginBottom: 8, textDecoration: "none",
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-              <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{m.question}</div>
-              <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                <div style={{ fontFamily: M, color: T.amber, fontSize: 12 }}>{fmt(m.volume24h)}</div>
-                <div style={{ fontFamily: M, color: T.dim, fontSize: 9.5, marginTop: 1, letterSpacing: 0.5 }}>{(m.source || "").toUpperCase()}</div>
+        {markets.map((m) => {
+          const sorted = Array.isArray(m.outcomes) ? [...m.outcomes].sort((a, b) => (b.price || 0) - (a.price || 0)) : [];
+          const favored = sorted[0];
+          return (
+            <a key={m.id} href={m.url} target="_blank" rel="noreferrer" style={{
+              display: "block", background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12,
+              padding: "12px 14px", marginBottom: 8, textDecoration: "none",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600, lineHeight: 1.4 }}>{m.question}</div>
+                <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <div style={{ fontFamily: M, color: T.amber, fontSize: 12 }}>{fmt(m.volume24h)}</div>
+                  <div style={{ fontFamily: M, color: T.dim, fontSize: 9.5, marginTop: 1, letterSpacing: 0.5 }}>{(m.source || "").toUpperCase()}</div>
+                </div>
               </div>
-            </div>
-            {Array.isArray(m.outcomes) && m.outcomes.length > 0 && (
-              <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
-                {m.outcomes.slice(0, 3).map((o, i) => (
-                  <div key={i} style={{ fontFamily: M, fontSize: 12 }}>
-                    <span style={{ color: T.dim }}>{o.name} </span>
-                    <span style={{ color: o.price > 0.5 ? T.green : T.text }}>{o.price != null ? Math.round(o.price * 100) + "¢" : "—"}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </a>
-        ))}
+              {favored && favored.price != null && (
+                <div style={{
+                  display: "inline-flex", alignItems: "center", gap: 6, marginTop: 8,
+                  background: T.green + "1a", border: `1px solid ${T.green}44`, borderRadius: 7, padding: "3px 9px",
+                }}>
+                  <span style={{ fontFamily: D, fontWeight: 800, fontSize: 11, letterSpacing: 0.5, color: T.green }}>MARKET LEANS</span>
+                  <span style={{ fontFamily: M, fontWeight: 700, fontSize: 12.5, color: T.text }}>{favored.name}</span>
+                  <span style={{ fontFamily: M, fontSize: 11.5, color: T.green }}>{Math.round(favored.price * 100)}¢</span>
+                </div>
+              )}
+              {sorted.length > 1 && (
+                <div style={{ display: "flex", gap: 12, marginTop: 6, flexWrap: "wrap" }}>
+                  {sorted.slice(1, 3).map((o, i) => (
+                    <div key={i} style={{ fontFamily: M, fontSize: 11.5 }}>
+                      <span style={{ color: T.dim }}>{o.name} </span>
+                      <span style={{ color: T.dim }}>{o.price != null ? Math.round(o.price * 100) + "¢" : "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </a>
+          );
+        })}
       </div>
     </div>
   );
@@ -1478,16 +1508,14 @@ function ChatTabCore({ askSignal }) {
 
     // API history: reuse prior text messages + this one (images only on current turn)
     const apiHistory = msgs.map((m) => ({ role: m.role, content: m.content })).concat([apiMsg]);
-    // Cost routing: quick plain-text questions use Haiku (fast, cheap).
-    // Deep Research and anything with an attached image stay on Sonnet,
-    // since those need the stronger reasoning/vision quality.
-    const useHaiku = !deep && !image;
+    // Desk stays on Sonnet for everything — quality matters more than the
+    // small savings from a cheaper model here. The real cost fix is the
+    // props cache below, which cuts spend without touching the brain at all.
     try {
       const reply = await apiChat(apiHistory, {
         system: (deep ? DEEP_SYSTEM : CHAT_SYSTEM) + historyBlock(),
         useSearch: true,
-        max_tokens: deep ? 3000 : 1200,
-        model: useHaiku ? "claude-haiku-4-5-20251001" : undefined,
+        max_tokens: deep ? 3000 : 1500,
       });
       setMsgs((m) => [...m, { role: "assistant", content: reply || "(empty response)" }]);
     } catch (e) {
