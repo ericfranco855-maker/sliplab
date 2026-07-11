@@ -586,7 +586,7 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
       <H1>The board</H1>
       <div style={{ color: T.dim, fontSize: 11.5, margin: "4px 0 2px" }}>FanDuel & DraftKings compared where available · take/lean/pass on every pick</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "10px 0 12px" }}>
-        <Seg options={["Edge", "Props", "Lines"]} value={mode} onChange={setMode} />
+        <Seg options={["Edge", "Props", "Lines", "Player"]} value={mode} onChange={setMode} />
         <Seg options={["mlb", "worldcup", "nba", "nfl", "nhl"]} value={sport} onChange={setSport} />
       </div>
 
@@ -609,6 +609,24 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
           {slateNote && (
             <div style={{ fontFamily: M, fontSize: 12, color: T.phosphor, margin: "6px 0 4px" }}>
               ● {slateNote}{propMeta?.cached && propMeta.cacheAgeSec != null && <span style={{ color: T.dim }}> · updated {Math.max(1, Math.round(propMeta.cacheAgeSec / 60))}m ago</span>}
+            </div>
+          )}
+          {(props_ || []).some((p) => String(p.verdict).toLowerCase().includes("take")) && (
+            <div style={{ background: T.green + "14", border: `1.5px solid ${T.green}55`, borderRadius: 12, padding: "12px 14px", margin: "10px 0" }}>
+              <div style={{ fontFamily: D, fontWeight: 800, fontSize: 13, letterSpacing: 1, color: T.green, textTransform: "uppercase" }}>
+                ⚡ High conviction today
+              </div>
+              <div style={{ fontSize: 11, color: T.dim, marginTop: 3, lineHeight: 1.4 }}>
+                These cleared the strictest bar — multiple factors lined up, nothing contradicting. Still not a promise, just the strongest reads on the board.
+              </div>
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
+                {(props_ || []).filter((p) => String(p.verdict).toLowerCase().includes("take")).map((p, i) => (
+                  <div key={i} style={{ fontSize: 12.5, color: T.text }}>
+                    <span style={{ fontFamily: M, color: T.green, marginRight: 6 }}>{Math.round(p.est_prob ?? 0)}%</span>
+                    {p.player} · {p.prop}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           <div style={{ marginTop: 10 }}>
@@ -721,6 +739,233 @@ function BoardTab({ onAsk, cart, addToCart, isInCart, onReviewCart }) {
               </button>
             );
           })}
+        </div>
+      )}
+
+      {mode === "Player" && <PlayerLookup />}
+    </div>
+  );
+}
+
+/* ================= PLAYER LOOKUP — real MLB game logs, actual history not AI guesses ================= */
+const HITTING_STATS = [
+  { key: "hits", label: "Hits", def: 1.5 },
+  { key: "totalBases", label: "Total Bases", def: 1.5 },
+  { key: "homeRuns", label: "Home Runs", def: 0.5 },
+  { key: "rbi", label: "RBIs", def: 0.5 },
+  { key: "runs", label: "Runs", def: 0.5 },
+  { key: "baseOnBalls", label: "Walks", def: 0.5 },
+  { key: "stolenBases", label: "Stolen Bases", def: 0.5 },
+];
+const PITCHING_STATS = [
+  { key: "strikeOuts", label: "Strikeouts", def: 5.5 },
+  { key: "earnedRuns", label: "Earned Runs", def: 2.5 },
+  { key: "hits", label: "Hits Allowed", def: 5.5 },
+  { key: "baseOnBalls", label: "Walks Allowed", def: 2.5 },
+  { key: "outs", label: "Outs Recorded", def: 17.5 },
+];
+
+function hitRate(games, statKey, threshold) {
+  if (!games.length) return null;
+  const hits = games.filter((g) => Number(g.stat?.[statKey] ?? 0) > threshold).length;
+  return Math.round((hits / games.length) * 100);
+}
+function avgOf(games, statKey) {
+  if (!games.length) return null;
+  const sum = games.reduce((a, g) => a + Number(g.stat?.[statKey] ?? 0), 0);
+  return (sum / games.length).toFixed(2);
+}
+
+function PlayerLookup() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState("");
+  const [player, setPlayer] = useState(null);
+  const [logData, setLogData] = useState(null); // { group, games }
+  const [loadingLog, setLoadingLog] = useState(false);
+  const [logErr, setLogErr] = useState("");
+  const [statKey, setStatKey] = useState(null);
+  const [threshold, setThreshold] = useState(null);
+  const [oppFilter, setOppFilter] = useState("All");
+
+  function search() {
+    if (!query.trim() || searching) return;
+    setSearching(true); setSearchErr(""); setResults([]);
+    fetch(`/api/mlb-player?action=search&q=${encodeURIComponent(query.trim())}`)
+      .then((r) => r.json())
+      .then((d) => { if (d.error) setSearchErr(d.error); else setResults(d.players || []); })
+      .catch((e) => setSearchErr(e.message))
+      .finally(() => setSearching(false));
+  }
+
+  function selectPlayer(p) {
+    setPlayer(p); setResults([]); setQuery(""); setLogData(null); setLogErr(""); setOppFilter("All");
+    setLoadingLog(true);
+    fetch(`/api/mlb-player?action=gamelog&id=${p.id}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) { setLogErr(d.error); return; }
+        setLogData(d);
+        const list = d.group === "pitching" ? PITCHING_STATS : HITTING_STATS;
+        setStatKey(list[0].key); setThreshold(list[0].def);
+      })
+      .catch((e) => setLogErr(e.message))
+      .finally(() => setLoadingLog(false));
+  }
+
+  const statList = logData?.group === "pitching" ? PITCHING_STATS : HITTING_STATS;
+  const allGames = logData?.games || [];
+  const opponents = [...new Set(allGames.map((g) => g.opponent).filter(Boolean))];
+  const filtered = oppFilter === "All" ? allGames : allGames.filter((g) => g.opponent === oppFilter);
+
+  const windows = statKey ? [
+    { label: "L5", games: filtered.slice(0, 5) },
+    { label: "L10", games: filtered.slice(0, 10) },
+    { label: "L15", games: filtered.slice(0, 15) },
+    { label: "Season", games: filtered },
+  ] : [];
+
+  const chartGames = filtered.slice(0, 15).reverse(); // chronological for the bar chart
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, color: T.dim, margin: "4px 0 8px" }}>
+        Real MLB game logs — official stats, not AI estimates
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && search()}
+          placeholder="Search any MLB player…" style={{
+            flex: 1, background: T.surface2, border: `1px solid ${T.line}`, borderRadius: 10,
+            padding: "11px 13px", color: T.text, fontSize: 14, outline: "none", fontFamily: "'Inter', sans-serif",
+          }} />
+        <button onClick={search} disabled={searching} style={{
+          background: T.amber, border: "none", borderRadius: 10, padding: "0 18px",
+          fontFamily: D, fontWeight: 700, fontSize: 15, color: "#1A1300", cursor: "pointer",
+          textTransform: "uppercase", opacity: searching ? 0.5 : 1,
+        }}>{searching ? "…" : "Search"}</button>
+      </div>
+      {searchErr && <div style={{ color: T.red, fontSize: 13, marginTop: 8 }}>{searchErr}</div>}
+
+      {results.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          {results.map((p) => (
+            <button key={p.id} onClick={() => selectPlayer(p)} style={{
+              display: "block", width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.line}`,
+              borderRadius: 10, padding: "10px 13px", marginBottom: 6, cursor: "pointer",
+            }}>
+              <span style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{p.name}</span>
+              <span style={{ color: T.dim, fontSize: 12, marginLeft: 8 }}>{p.position} · {p.team}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {loadingLog && <div style={{ marginTop: 14 }}><Spinner label="Pulling real game log from MLB.com…" /></div>}
+      {logErr && <div style={{ color: T.red, fontSize: 13, marginTop: 14 }}>{logErr}</div>}
+
+      {player && logData && !loadingLog && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontFamily: D, fontWeight: 800, fontSize: 20, color: T.text, textTransform: "uppercase" }}>{player.name}</div>
+          <div style={{ fontSize: 12, color: T.dim, marginTop: 2 }}>{player.position} · {player.team} · {logData.group === "pitching" ? "Pitching" : "Hitting"} log, {allGames.length} games this season</div>
+
+          <div style={{ marginTop: 12 }}>
+            <div style={lbl}>Stat</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {statList.map((s) => (
+                <button key={s.key} onClick={() => { setStatKey(s.key); setThreshold(s.def); }} style={{
+                  padding: "7px 12px", borderRadius: 99, border: `1.5px solid ${statKey === s.key ? T.amber : T.line}`,
+                  background: statKey === s.key ? T.amber : "transparent", color: statKey === s.key ? "#1A1300" : T.dim,
+                  fontFamily: D, fontWeight: 700, fontSize: 12.5, cursor: "pointer",
+                }}>{s.label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
+            <div style={lbl}>Line</div>
+            <button onClick={() => setThreshold((t) => Math.max(0.5, t - 1))} style={{
+              width: 30, height: 30, borderRadius: 8, border: `1px solid ${T.line}`, background: T.surface2, color: T.text, fontSize: 16, cursor: "pointer",
+            }}>−</button>
+            <span style={{ fontFamily: M, fontWeight: 700, fontSize: 16, color: T.amber, minWidth: 40, textAlign: "center" }}>{threshold != null ? "O " + threshold : ""}</span>
+            <button onClick={() => setThreshold((t) => t + 1)} style={{
+              width: 30, height: 30, borderRadius: 8, border: `1px solid ${T.line}`, background: T.surface2, color: T.text, fontSize: 16, cursor: "pointer",
+            }}>+</button>
+          </div>
+
+          {opponents.length > 1 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={lbl}>Vs. opponent</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                <button onClick={() => setOppFilter("All")} style={{
+                  padding: "6px 11px", borderRadius: 99, border: `1.5px solid ${oppFilter === "All" ? T.phosphor : T.line}`,
+                  background: oppFilter === "All" ? T.phosphor + "22" : "transparent", color: oppFilter === "All" ? T.phosphor : T.dim,
+                  fontFamily: D, fontWeight: 700, fontSize: 11.5, cursor: "pointer",
+                }}>All</button>
+                {opponents.slice(0, 8).map((o) => (
+                  <button key={o} onClick={() => setOppFilter(o)} style={{
+                    padding: "6px 11px", borderRadius: 99, border: `1.5px solid ${oppFilter === o ? T.phosphor : T.line}`,
+                    background: oppFilter === o ? T.phosphor + "22" : "transparent", color: oppFilter === o ? T.phosphor : T.dim,
+                    fontFamily: D, fontWeight: 700, fontSize: 11.5, cursor: "pointer",
+                  }}>{o}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {statKey && (
+            <div style={{ display: "flex", gap: 6, marginTop: 14 }}>
+              {windows.map((w) => {
+                const rate = hitRate(w.games, statKey, threshold);
+                return (
+                  <div key={w.label} style={{ flex: 1, background: T.surface, border: `1px solid ${T.line}`, borderRadius: 10, padding: "8px 4px", textAlign: "center" }}>
+                    <div style={{ fontFamily: D, fontWeight: 700, fontSize: 11, color: T.dim, textTransform: "uppercase" }}>{w.label}</div>
+                    <div style={{ fontFamily: M, fontWeight: 700, fontSize: 15, color: rate == null ? T.dim : rate >= 60 ? T.green : rate >= 45 ? T.amber : T.red, marginTop: 2 }}>
+                      {rate == null ? "—" : rate + "%"}
+                    </div>
+                    <div style={{ fontFamily: M, fontSize: 9.5, color: T.dim, marginTop: 1 }}>avg {avgOf(w.games, statKey) ?? "—"}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {statKey && chartGames.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div style={lbl}>Last {chartGames.length} games</div>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 110, marginTop: 6 }}>
+                {chartGames.map((g, i) => {
+                  const val = Number(g.stat?.[statKey] ?? 0);
+                  const max = Math.max(...chartGames.map((x) => Number(x.stat?.[statKey] ?? 0)), threshold, 1);
+                  const h = Math.max(4, (val / max) * 100);
+                  const hit = val > threshold;
+                  return (
+                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                      <div style={{ fontFamily: M, fontSize: 9.5, color: T.dim }}>{val}</div>
+                      <div style={{ width: "100%", height: h + "%", background: hit ? T.green : T.red, borderRadius: "3px 3px 0 0", minHeight: 4 }} />
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                {chartGames.map((g, i) => (
+                  <div key={i} style={{ flex: 1, textAlign: "center", fontFamily: M, fontSize: 8, color: T.dim, overflow: "hidden", whiteSpace: "nowrap" }}>
+                    {g.date ? g.date.slice(5) : ""}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ fontSize: 11, color: T.dim, marginTop: 14, lineHeight: 1.5 }}>
+            Straight from MLB's official stats — real recorded games, not an AI guess. Green bars cleared the line, red didn't.
+          </div>
+        </div>
+      )}
+
+      {!player && results.length === 0 && !searching && (
+        <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 30, lineHeight: 1.6 }}>
+          Search any MLB player to see their real game-by-game history against any line you set.
         </div>
       )}
     </div>
