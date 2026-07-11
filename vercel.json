@@ -2,6 +2,7 @@
   "functions": {
     "api/chat.js": { "maxDuration": 60 },
     "api/props.js": { "maxDuration": 60 },
+    "api/free-board.js": { "maxDuration": 45 },
     "api/odds.js": { "maxDuration": 30 },
     "api/trending.js": { "maxDuration": 30 },
     "api/scores.js": { "maxDuration": 30 },
