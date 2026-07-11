@@ -1311,6 +1311,132 @@ function TodayTab({ onAsk }) {
 }
 
 /* ================= TRENDING ================= */
+/* ================= FREE BOARD — zero AI cost, ever. Real math + real MLB stats only ================= */
+function FreeBoardTab() {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [sportFilter, setSportFilter] = useState("All");
+
+  function load() {
+    fetch("/api/free-board").then((r) => r.json())
+      .then((d) => { if (d.error) setErr(d.error); else { setData(d); setErr(""); } })
+      .catch((e) => setErr(e.message));
+  }
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 90000); // poll often — almost always just re-serves the server cache, free
+    return () => clearInterval(t);
+  }, []);
+
+  const mlList = data?.moneylines || [];
+  const pitchers = data?.mlbPitchers || [];
+  const shownMl = sportFilter === "All" ? mlList : mlList.filter((m) => m.sport === sportFilter);
+  const sportsAvailable = [...new Set(mlList.map((m) => m.sport))];
+
+  const topPick = mlList[0];
+  const hotPitcher = pitchers.find((p) => p.momentum === "hot");
+
+  return (
+    <div style={{ height: "100%", overflowY: "auto", padding: "16px 14px 20px" }}>
+      <H1>Free Board</H1>
+      <div style={{ color: T.dim, fontSize: 12.5, margin: "6px 0 12px", lineHeight: 1.5 }}>
+        Zero AI cost, ever — real devigged moneylines across every sport, and real MLB pitcher form from official game logs. Auto-updates, nothing to click, nothing to pay for.
+      </div>
+
+      {!data && !err && <Spinner label="Pulling free data…" />}
+      {err && <div style={{ color: T.red, fontSize: 13 }}>{err}</div>}
+
+      {(topPick || hotPitcher) && (
+        <div style={{ background: T.phosphor + "14", border: `1.5px solid ${T.phosphor}55`, borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+          <div style={{ fontFamily: D, fontWeight: 800, fontSize: 13, letterSpacing: 1, color: T.phosphor, textTransform: "uppercase" }}>Best of what's free right now</div>
+          {topPick && (
+            <div style={{ fontSize: 12.5, color: T.text, marginTop: 6 }}>
+              <span style={{ fontFamily: M, color: T.phosphor, marginRight: 6 }}>{topPick.pct}%</span>
+              Strongest moneyline: <b>{topPick.pick}</b> ({topPick.game})
+            </div>
+          )}
+          {hotPitcher && (
+            <div style={{ fontSize: 12.5, color: T.text, marginTop: 4 }}>
+              <span style={{ fontFamily: M, color: T.green, marginRight: 6 }}>↑ hot</span>
+              {hotPitcher.player} is averaging {hotPitcher.l5} Ks over his last 5 starts vs {hotPitcher.season} on the season
+            </div>
+          )}
+          <div style={{ fontSize: 10.5, color: T.dim, marginTop: 6 }}>Real signal, not a promise — always your call.</div>
+        </div>
+      )}
+
+      <div style={{ fontFamily: D, fontWeight: 800, fontSize: 16, color: T.text, textTransform: "uppercase", marginTop: 4 }}>Moneylines — every sport</div>
+      {sportsAvailable.length > 1 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+          {["All", ...sportsAvailable].map((s) => (
+            <button key={s} onClick={() => setSportFilter(s)} style={{
+              padding: "6px 12px", borderRadius: 99, border: `1.5px solid ${sportFilter === s ? T.amber : T.line}`,
+              background: sportFilter === s ? T.amber : "transparent", color: sportFilter === s ? "#1A1300" : T.dim,
+              fontFamily: D, fontWeight: 700, fontSize: 12, cursor: "pointer",
+            }}>{s}</button>
+          ))}
+        </div>
+      )}
+      <div style={{ marginTop: 10 }}>
+        {data && shownMl.length === 0 && <div style={{ color: T.dim, fontSize: 13, textAlign: "center", marginTop: 10 }}>No games on the board right now.</div>}
+        {shownMl.map((m, i) => {
+          const verdict = verdictFor(m.pct);
+          return (
+            <div key={i} style={{ background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12, padding: "11px 14px", marginBottom: 7 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>
+                  <span style={{ fontFamily: M, color: T.amber, fontSize: 10.5, marginRight: 7 }}>{m.sport}</span>
+                  {m.pick}
+                </div>
+                <div style={{ fontFamily: M, fontSize: 12.5, color: String(m.odds).startsWith("-") ? T.red : T.green }}>{m.odds}</div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, margin: "3px 0 7px" }}>
+                <div style={{ fontSize: 11, color: T.dim }}>{m.game}</div>
+                <div style={{ fontFamily: M, fontSize: 10.5, color: T.dim }}>{fmtWhen(m.start)}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1 }}><ProbBar pct={m.pct} /></div>
+                <VerdictChip verdict={verdict} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ fontFamily: D, fontWeight: 800, fontSize: 16, color: T.text, textTransform: "uppercase", marginTop: 20 }}>MLB probable pitchers — real form</div>
+      <div style={{ fontSize: 11, color: T.dim, margin: "4px 0 10px", lineHeight: 1.4 }}>
+        Actual strikeout averages from MLB's official game logs — no guessed sportsbook line, just real recent trend vs their season number.
+      </div>
+      {pitchers.length === 0 && data && <div style={{ color: T.dim, fontSize: 13, textAlign: "center" }}>No probable pitchers found for today yet.</div>}
+      {pitchers.map((p, i) => (
+        <div key={i} style={{ background: T.surface, border: `1px solid ${T.line}`, borderRadius: 12, padding: "11px 14px", marginBottom: 7 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+            <div style={{ color: T.text, fontSize: 13.5, fontWeight: 600 }}>{p.player}</div>
+            <span style={{
+              fontFamily: D, fontWeight: 800, fontSize: 11, letterSpacing: 0.5, padding: "2px 8px", borderRadius: 6,
+              color: p.momentum === "hot" ? T.green : p.momentum === "cold" ? T.red : T.dim,
+              background: (p.momentum === "hot" ? T.green : p.momentum === "cold" ? T.red : T.dim) + "1a",
+            }}>{p.momentum === "hot" ? "↑ HOT" : p.momentum === "cold" ? "↓ COLD" : "STEADY"}</span>
+          </div>
+          <div style={{ fontSize: 11, color: T.dim, margin: "3px 0 7px" }}>{p.team} vs {p.opponent} · {fmtWhen(p.gameTime)}</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[["L5", p.l5], ["L10", p.l10], ["Season", p.season]].map(([lab, val]) => (
+              <div key={lab} style={{ flex: 1, textAlign: "center", background: T.surface2, borderRadius: 8, padding: "5px 0" }}>
+                <div style={{ fontFamily: M, fontWeight: 700, fontSize: 13, color: T.amber }}>{val ?? "—"}</div>
+                <div style={{ fontFamily: D, fontSize: 9.5, color: T.dim, textTransform: "uppercase" }}>{lab} Ks</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {data?.updated && (
+        <div style={{ fontSize: 10.5, color: T.dim, textAlign: "center", marginTop: 14 }}>Updated {fmtWhen(data.updated)}</div>
+      )}
+    </div>
+  );
+}
+
 function TrendingTab() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
@@ -1613,7 +1739,7 @@ function AppInner() {
   function isInCart(id) { return cart.some((p) => p.id === id); }
   function goReviewCart() { setTab("parlay"); setReviewSignal(Date.now()); }
 
-  const TABS = [["chat", "Desk"], ["today", "Today"], ["board", "Board"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "Slips"]];
+  const TABS = [["free", "Free"], ["chat", "Desk"], ["today", "Today"], ["board", "Board"], ["parlay", "Builder"], ["trend", "Trending"], ["slips", "Slips"]];
 
   // Every tab stays mounted at all times — only visibility toggles. This is what
   // lets Desk research keep running in the background and preserves scroll/state
@@ -1658,6 +1784,7 @@ function AppInner() {
 
         <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
           <Boundary>
+            {keep("free", <FreeBoardTab />)}
             {keep("chat", <ChatTabCore askSignal={askSignal} />)}
             {keep("today", <TodayTab onAsk={askFromBoard} />)}
             {keep("board", <BoardTab onAsk={askFromBoard} cart={cart} addToCart={addToCart} isInCart={isInCart} onReviewCart={goReviewCart} />)}
