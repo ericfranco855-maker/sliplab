@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/chat.js": { "maxDuration": 60 },
+    "api/props.js": { "maxDuration": 60 },
+    "api/odds.js": { "maxDuration": 30 },
+    "api/trending.js": { "maxDuration": 30 },
+    "api/scores.js": { "maxDuration": 30 },
+    "api/mlb-player.js": { "maxDuration": 30 }
+  }
+}
